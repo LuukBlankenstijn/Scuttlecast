@@ -1,8 +1,4 @@
-use std::{
-    fs::File,
-    net::{Ipv4Addr, SocketAddrV4},
-    path::PathBuf,
-};
+use std::{fs::File, net::Ipv4Addr, path::PathBuf};
 
 use crate::{
     BLOCK_SIZE,
@@ -11,38 +7,23 @@ use crate::{
         reorderer::Reorderer,
         sink::{FileSink, Sink, StreamSink},
     },
+    transport::MessageSocket,
 };
+use bon::Builder;
 use proto::{Hello, Message};
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 mod reorderer;
 mod sink;
 
+#[derive(Builder)]
 pub struct Receiver {
-    socket: UdpSocket,
+    #[builder(with = |local_address: Ipv4Addr, group_address: Ipv4Addr, port: u16,| -> Result<_, ProtoError> { 
+        MessageSocket::receiving(local_address, group_address, port)
+    } )]
+    socket: MessageSocket,
 }
 
 impl Receiver {
-    pub fn new(
-        local_address: Ipv4Addr,
-        group_address: Ipv4Addr,
-        portbase: u16,
-    ) -> Result<Self, ProtoError> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_reuse_address(true)?;
-        socket.set_reuse_port(true)?;
-        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, portbase + 1).into())?;
-        socket.join_multicast_v4(&group_address, &local_address)?;
-        socket.set_nonblocking(true)?;
-        let std_socket: std::net::UdpSocket = socket.into();
-        let tokio_socket = UdpSocket::from_std(std_socket)?;
-
-        Ok(Self {
-            socket: tokio_socket,
-        })
-    }
-
     pub async fn recv_file(&self, path: PathBuf) -> Result<(), ProtoError> {
         let sink = FileSink::new(File::create(path).map_err(ProtoError::File)?);
         self.recv(sink).await
@@ -89,21 +70,15 @@ impl Receiver {
 
     async fn recv_hello(&self) -> Result<Hello, ProtoError> {
         Ok(loop {
-            if let Message::Hello(hello) = self.recv_message().await? {
+            if let (Message::Hello(hello), _) = self.socket.recv_from().await? {
                 break hello;
             }
         })
     }
 
-    async fn recv_message(&self) -> Result<Message, ProtoError> {
-        let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
-        let (len, _src) = self.socket.recv_from(&mut buf).await?;
-        Ok(Message::decode(&buf[..len])?)
-    }
-
     async fn recv_transfer_message(&self, transfer_id: u64) -> Result<Message, ProtoError> {
         loop {
-            let message = self.recv_message().await?;
+            let (message, _) = self.socket.recv_from().await?;
             if message.transfer_id() == transfer_id {
                 return Ok(message);
             }

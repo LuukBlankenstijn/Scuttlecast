@@ -12,6 +12,7 @@ futures-util.workspace = true
 rand.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
+bon.workspace = true
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
