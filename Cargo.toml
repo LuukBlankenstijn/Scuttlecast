@@ -3,3 +3,17 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
+proto = { package = "scuttlecast-proto", path = "crates/scuttlecast-proto" }
+scuttlecast = { path = "crates/scuttlecast" }
+async-stream = "0.3"
+bincode = "2.0"
+clap = { version = "4.6.6", features = ["derive"] }
+derive_more = "2.1.1"
+futures-core = "0.3"
+futures-util = "0.3"
+proptest = "1"
+proptest-derive = "0.6"
+rand = "0.10.2"
+socket2 = "0.6.5"
+thiserror = "2.0"
+tokio = "1"

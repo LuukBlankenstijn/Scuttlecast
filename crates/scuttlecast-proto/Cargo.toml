@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bincode = "2.0"
+bincode.workspace = true
+derive_more = { workspace = true, features = ["display"] }
+thiserror.workspace = true
 
 [dev-dependencies]
-proptest = "1"
-proptest-derive = "0.6"
+proptest.workspace = true
+proptest-derive.workspace = true
