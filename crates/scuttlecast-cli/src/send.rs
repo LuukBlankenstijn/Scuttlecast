@@ -13,9 +13,9 @@ pub struct Args {
     #[arg(short, long, default_value_t = Ipv4Addr::UNSPECIFIED)]
     interface: Ipv4Addr,
 
-    /// Port to use for multicast
+    /// Ports to use. sender uses portbase and receiver uses portbase+1
     #[arg(short, long, default_value_t = 5000)]
-    port: u16,
+    portbase: u16,
 
     /// Multicast address
     #[arg(short, long)]
@@ -23,7 +23,8 @@ pub struct Args {
 }
 
 pub async fn send(args: Args) -> Result<(), ProtoError> {
-    let sender = scuttlecast::sender::Sender::new(args.interface, args.address, args.port).unwrap();
+    let sender =
+        scuttlecast::sender::Sender::new(args.interface, args.address, args.portbase).unwrap();
     match args.file {
         Some(filepath) => sender.send_file(filepath).await,
         None => sender.send(tokio::io::stdin()).await,

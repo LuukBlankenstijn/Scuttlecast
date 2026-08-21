@@ -27,11 +27,12 @@ impl Receiver {
     pub fn new(
         local_address: Ipv4Addr,
         group_address: Ipv4Addr,
-        group_port: u16,
+        portbase: u16,
     ) -> Result<Self, ProtoError> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
-        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, group_port).into())?;
+        socket.set_reuse_port(true)?;
+        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, portbase + 1).into())?;
         socket.join_multicast_v4(&group_address, &local_address)?;
         socket.set_nonblocking(true)?;
         let std_socket: std::net::UdpSocket = socket.into();

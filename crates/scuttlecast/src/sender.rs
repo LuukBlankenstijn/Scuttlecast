@@ -22,10 +22,10 @@ impl Sender {
     pub fn new(
         local_address: Ipv4Addr,
         group_address: Ipv4Addr,
-        group_port: u16,
+        portbase: u16,
     ) -> Result<Self, ProtoError> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into())?;
+        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, portbase).into())?;
         socket.set_multicast_if_v4(&local_address)?;
         socket.set_nonblocking(true)?;
         let std_socket: std::net::UdpSocket = socket.into();
@@ -34,7 +34,7 @@ impl Sender {
         Ok(Self {
             socket: tokio_socket,
             group_address,
-            group_port,
+            group_port: portbase,
         })
     }
 
@@ -85,7 +85,7 @@ impl Sender {
     async fn send_message(&self, message: Message) -> Result<(), ProtoError> {
         let bytes = message.encode()?;
         self.socket
-            .send_to(&bytes, (self.group_address, self.group_port))
+            .send_to(&bytes, (self.group_address, self.group_port + 1))
             .await?;
         Ok(())
     }
