@@ -52,6 +52,19 @@ impl MessageSocket {
         Ok((Message::decode(&buf[..len])?, src))
     }
 
+    /// Returns the first message with equal transfer_id, discards the rest
+    pub async fn recv_in_transfer(
+        &self,
+        transfer_id: u64,
+    ) -> Result<(Message, SocketAddr), ProtoError> {
+        loop {
+            let (message, socket) = self.recv_from().await?;
+            if message.transfer_id() == transfer_id {
+                return Ok((message, socket));
+            }
+        }
+    }
+
     pub async fn send_to(&self, message: Message, to: SocketAddr) -> Result<(), ProtoError> {
         let bytes = message.encode()?;
         self.socket.send_to(&bytes, to).await?;

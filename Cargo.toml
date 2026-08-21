@@ -18,3 +18,5 @@ socket2 = "0.6.5"
 thiserror = "2.0"
 tokio = "1"
 bon = "3.9.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

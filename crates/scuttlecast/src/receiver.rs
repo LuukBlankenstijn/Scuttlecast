@@ -1,4 +1,8 @@
-use std::{fs::File, net::Ipv4Addr, path::PathBuf};
+use std::{
+    fs::File,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use crate::{
     BLOCK_SIZE,
@@ -10,14 +14,18 @@ use crate::{
     transport::MessageSocket,
 };
 use bon::Builder;
-use proto::{Hello, Message};
+use proto::{
+    Hello,
+    Message::{self, Join},
+};
 use tokio::sync::mpsc;
+use tracing::info;
 mod reorderer;
 mod sink;
 
 #[derive(Builder)]
 pub struct Receiver {
-    #[builder(with = |local_address: Ipv4Addr, group_address: Ipv4Addr, port: u16,| -> Result<_, ProtoError> { 
+    #[builder(with = |local_address: Ipv4Addr, group_address: Ipv4Addr, port: u16,| -> Result<_, ProtoError> {
         MessageSocket::receiving(local_address, group_address, port)
     } )]
     socket: MessageSocket,
@@ -37,13 +45,22 @@ impl Receiver {
     }
 
     async fn recv(&self, mut sink: impl Sink) -> Result<(), ProtoError> {
-        let hello = self.recv_hello().await?;
-        println!("got hello message {hello}",);
+        let (hello, sender_socket) = self.recv_hello().await?;
+        let receiver_id = rand::random();
+        info!("got hello message {hello}");
+        self.socket
+            .send_to(Join(hello.transfer_id, receiver_id), sender_socket)
+            .await?;
 
         let mut received_bytes = 0;
         let done = loop {
-            let message = self.recv_transfer_message(hello.transfer_id).await?;
+            let (message, _) = self.socket.recv_in_transfer(hello.transfer_id).await?;
             match message {
+                Message::Hello(_) => {
+                    self.socket
+                        .send_to(Join(hello.transfer_id, receiver_id), sender_socket)
+                        .await?
+                }
                 Message::Data(data) => {
                     let block_no = data.block_no(hello.blocks_per_slice);
                     received_bytes += data.payload.len() as u64;
@@ -68,20 +85,11 @@ impl Receiver {
         Ok(())
     }
 
-    async fn recv_hello(&self) -> Result<Hello, ProtoError> {
+    async fn recv_hello(&self) -> Result<(Hello, SocketAddr), ProtoError> {
         Ok(loop {
-            if let (Message::Hello(hello), _) = self.socket.recv_from().await? {
-                break hello;
+            if let (Message::Hello(hello), socket) = self.socket.recv_from().await? {
+                break (hello, socket);
             }
         })
-    }
-
-    async fn recv_transfer_message(&self, transfer_id: u64) -> Result<Message, ProtoError> {
-        loop {
-            let (message, _) = self.socket.recv_from().await?;
-            if message.transfer_id() == transfer_id {
-                return Ok(message);
-            }
-        }
     }
 }

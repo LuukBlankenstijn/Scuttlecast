@@ -56,10 +56,11 @@ pub struct Parity {
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
-    "Stats(transfer_id={transfer_id}, received_since_last={received_since_last}, expected_since_last={expected_since_last})"
+    "Stats(transfer_id={transfer_id}, receiver_id={receiver_id}, received_since_last={received_since_last}, expected_since_last={expected_since_last})"
 )]
 pub struct Stats {
     pub transfer_id: u64,
+    pub receiver_id: u64,
     pub received_since_last: u32,
     pub expected_since_last: u32,
 }
@@ -68,11 +69,12 @@ pub struct Stats {
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
-    "Nack(transfer_id={transfer_id}, slice_no={slice_no}, missing={} blocks)",
+    "Nack(transfer_id={transfer_id}, receiver_id={receiver_id}, slice_no={slice_no}, missing={} blocks)",
     missing.len()
 )]
 pub struct Nack {
     pub transfer_id: u64,
+    pub receiver_id: u64,
     pub slice_no: u32,
     pub missing: Vec<u16>,
 }
@@ -80,7 +82,9 @@ pub struct Nack {
 /// Sender -> Group, announces the transfer is done
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-#[display("Done(transfer_id={transfer_id}, total_bytes={total_bytes}, total_blocks={total_blocks})")]
+#[display(
+    "Done(transfer_id={transfer_id}, total_bytes={total_bytes}, total_blocks={total_blocks})"
+)]
 pub struct Done {
     pub transfer_id: u64,
     pub total_bytes: u64,

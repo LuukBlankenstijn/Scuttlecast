@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 scuttlecast.workspace = true
 clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",

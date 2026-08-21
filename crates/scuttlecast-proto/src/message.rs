@@ -10,11 +10,11 @@ use crate::payload::{Data, Done, Hello, Nack, Parity, Stats};
 pub enum Message {
     Hello(Hello),
     /// Receiver -> Sender, tells the sender it joined the group
-    #[display("Join(transfer_id={_0})")]
-    Join(u64),
+    #[display("Join(transfer_id={_0}, receiver_id={_1})")]
+    Join(u64, u64),
     /// Receiver -> Sender, tells the sender it left the group
-    #[display("Leave(transfer_id={_0})")]
-    Leave(u64),
+    #[display("Leave(transfer_id={_0}, receiver_id={_1})")]
+    Leave(u64, u64),
     Data(Data),
     Parity(Parity),
     Stats(Stats),
@@ -26,8 +26,8 @@ impl Message {
     pub fn transfer_id(&self) -> u64 {
         match self {
             Message::Hello(hello) => hello.transfer_id,
-            Message::Join(transfer_id) => *transfer_id,
-            Message::Leave(transfer_id) => *transfer_id,
+            Message::Join(transfer_id, _) => *transfer_id,
+            Message::Leave(transfer_id, _) => *transfer_id,
             Message::Data(data) => data.transfer_id,
             Message::Parity(parity) => parity.transfer_id,
             Message::Stats(stats) => stats.transfer_id,
