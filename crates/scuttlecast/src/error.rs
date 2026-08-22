@@ -16,4 +16,7 @@ pub enum ProtoError {
 
     #[error("expected {expected} bytes, received {received}")]
     ByteCountMismatch { expected: u64, received: u64 },
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
 }

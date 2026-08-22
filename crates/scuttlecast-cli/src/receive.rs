@@ -1,6 +1,6 @@
 use clap::Parser;
 use scuttlecast::error::ProtoError;
-use std::{net::Ipv4Addr, path::PathBuf};
+use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Parser)]
@@ -20,11 +20,22 @@ pub struct Args {
     /// Multicast ip
     #[arg(short, long, default_value_t = Ipv4Addr::from([239, 1, 1, 1]))]
     group_ip: Ipv4Addr,
+
+    /// Time in seconds the receiver waits for an initial hello message
+    #[arg(short, long, default_value = "300", value_parser = parse_seconds)]
+    wait: Duration,
+}
+
+fn parse_seconds(s: &str) -> Result<Duration, String> {
+    s.parse::<u64>()
+        .map(Duration::from_secs)
+        .map_err(|e| e.to_string())
 }
 
 pub async fn receive(args: Args) -> Result<(), ProtoError> {
     let receiver = scuttlecast::receiver::Receiver::builder()
         .socket(args.local_ip, args.group_ip, args.port)?
+        .max_wait(args.wait)
         .build();
     match args.file {
         Some(path) => {

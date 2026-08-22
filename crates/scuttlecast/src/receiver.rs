@@ -2,6 +2,7 @@ use std::{
     fs::File,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 use crate::{
@@ -18,7 +19,7 @@ use proto::{
     Hello,
     Message::{self, Join},
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 use tracing::info;
 mod reorderer;
 mod sink;
@@ -29,6 +30,7 @@ pub struct Receiver {
         MessageSocket::receiving(local_address, group_address, port)
     } )]
     socket: MessageSocket,
+    max_wait: Duration,
 }
 
 impl Receiver {
@@ -86,10 +88,20 @@ impl Receiver {
     }
 
     async fn recv_hello(&self) -> Result<(Hello, SocketAddr), ProtoError> {
-        Ok(loop {
-            if let (Message::Hello(hello), socket) = self.socket.recv_from().await? {
-                break (hello, socket);
+        let deadline = Instant::now() + self.max_wait;
+
+        loop {
+            tokio::select! {
+                r = self.socket.recv_from() => {
+                    if let (Message::Hello(hello), socket) = r? {
+                        return Ok((hello, socket));
+                    }
+                },
+
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(ProtoError::Timeout("Timed out listening for hello message".to_string()));
+                },
             }
-        })
+        }
     }
 }
