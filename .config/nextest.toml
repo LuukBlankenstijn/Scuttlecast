@@ -1,0 +1,10 @@
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }
+fail-fast = false
+
+[test-groups]
+network = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(e2e_file) + binary(e2e_group) + binary(e2e_stream) + binary(stress)'
+test-group = 'network'

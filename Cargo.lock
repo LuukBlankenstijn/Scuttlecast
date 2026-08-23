@@ -694,6 +694,7 @@ dependencies = [
  "rand 0.10.2",
  "scuttlecast-proto",
  "socket2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

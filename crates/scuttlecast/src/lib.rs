@@ -3,4 +3,4 @@ pub mod receiver;
 pub mod sender;
 mod transport;
 
-const BLOCK_SIZE: usize = 1400;
+pub const BLOCK_SIZE: usize = 1400;

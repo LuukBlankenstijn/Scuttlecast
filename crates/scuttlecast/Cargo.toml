@@ -24,3 +24,7 @@ tokio = { workspace = true, features = [
     "sync",
     "time",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
+proto.workspace = true

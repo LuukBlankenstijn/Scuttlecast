@@ -38,3 +38,53 @@ impl Sink for StreamSink {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FileSink, Sink};
+    use std::fs;
+
+    fn sink(path: &std::path::Path) -> FileSink {
+        FileSink::new(fs::File::create(path).expect("create"))
+    }
+
+    #[tokio::test]
+    async fn writes_blocks_at_their_offsets_regardless_of_arrival_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.bin");
+        let mut sink = sink(&path);
+
+        sink.write(2, 8, b"CCCC").await.expect("write");
+        sink.write(0, 0, b"AAAA").await.expect("write");
+        sink.write(1, 4, b"BBBB").await.expect("write");
+        sink.finish().await.expect("finish");
+
+        assert_eq!(fs::read(&path).expect("read"), b"AAAABBBBCCCC");
+    }
+
+    #[tokio::test]
+    async fn short_final_block_sets_file_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.bin");
+        let mut sink = sink(&path);
+
+        sink.write(0, 0, b"AAAA").await.expect("write");
+        sink.write(1, 4, b"BB").await.expect("write");
+        sink.finish().await.expect("finish");
+
+        assert_eq!(fs::read(&path).expect("read"), b"AAAABB");
+    }
+
+    #[tokio::test]
+    async fn gap_between_blocks_reads_back_as_zeroes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.bin");
+        let mut sink = sink(&path);
+
+        sink.write(0, 0, b"AAAA").await.expect("write");
+        sink.write(2, 8, b"CCCC").await.expect("write");
+        sink.finish().await.expect("finish");
+
+        assert_eq!(fs::read(&path).expect("read"), b"AAAA\0\0\0\0CCCC");
+    }
+}

@@ -39,3 +39,70 @@ impl Reorderer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Reorderer;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    #[tokio::test]
+    async fn emits_blocks_arriving_in_order() {
+        let (mut reorderer, mut rx) = Reorderer::new();
+
+        reorderer.on_block(0, vec![1]).await;
+        reorderer.on_block(1, vec![2]).await;
+
+        assert_eq!(rx.try_recv(), Ok(vec![1]));
+        assert_eq!(rx.try_recv(), Ok(vec![2]));
+    }
+
+    #[tokio::test]
+    async fn holds_blocks_until_the_gap_is_filled() {
+        let (mut reorderer, mut rx) = Reorderer::new();
+
+        reorderer.on_block(2, vec![3]).await;
+        reorderer.on_block(1, vec![2]).await;
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        reorderer.on_block(0, vec![1]).await;
+
+        assert_eq!(rx.try_recv(), Ok(vec![1]));
+        assert_eq!(rx.try_recv(), Ok(vec![2]));
+        assert_eq!(rx.try_recv(), Ok(vec![3]));
+    }
+
+    #[tokio::test]
+    async fn ignores_blocks_already_emitted() {
+        let (mut reorderer, mut rx) = Reorderer::new();
+
+        reorderer.on_block(0, vec![1]).await;
+        assert_eq!(rx.try_recv(), Ok(vec![1]));
+
+        reorderer.on_block(0, vec![99]).await;
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn later_duplicate_overwrites_pending_block() {
+        let (mut reorderer, mut rx) = Reorderer::new();
+
+        reorderer.on_block(1, vec![2]).await;
+        reorderer.on_block(1, vec![2]).await;
+        reorderer.on_block(0, vec![1]).await;
+
+        assert_eq!(rx.try_recv(), Ok(vec![1]));
+        assert_eq!(rx.try_recv(), Ok(vec![2]));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn flush_drops_blocks_stranded_behind_a_missing_one() {
+        let (mut reorderer, mut rx) = Reorderer::new();
+
+        reorderer.on_block(1, vec![2]).await;
+        reorderer.on_block(2, vec![3]).await;
+        reorderer.flush().await;
+
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+}
