@@ -28,3 +28,4 @@ tokio = { workspace = true, features = [
 [dev-dependencies]
 tempfile.workspace = true
 proto.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

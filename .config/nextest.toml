@@ -6,5 +6,5 @@ fail-fast = false
 network = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(e2e_file) + binary(e2e_group) + binary(e2e_stream) + binary(stress)'
+filter = 'kind(test)'
 test-group = 'network'

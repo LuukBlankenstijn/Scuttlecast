@@ -4,9 +4,11 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use proto::Message;
 use scuttlecast::receiver::Receiver;
 use scuttlecast::sender::Sender;
 use tempfile::TempDir;
+use tokio::net::UdpSocket;
 
 pub const LOCAL: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 pub const MAX_WAIT: Duration = Duration::from_secs(10);
@@ -93,4 +95,26 @@ pub async fn transfer_to_file(group_id: u8, port: u16, bytes: &[u8]) -> Vec<u8> 
 
     receiving.await.expect("join").expect("receive");
     std::fs::read(&path).expect("read output")
+}
+
+pub struct Rogue {
+    socket: UdpSocket,
+    destination: (Ipv4Addr, u16),
+}
+
+impl Rogue {
+    pub async fn new(group_ip: Ipv4Addr, port: u16) -> Self {
+        Self {
+            socket: UdpSocket::bind((LOCAL, 0)).await.expect("bind rogue"),
+            destination: (group_ip, port + 1),
+        }
+    }
+
+    pub async fn send(&self, message: Message) {
+        let bytes = message.encode().expect("encode");
+        self.socket
+            .send_to(&bytes, self.destination)
+            .await
+            .expect("send");
+    }
 }
