@@ -69,7 +69,9 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
 
     let receiving = tokio::spawn(async move { receiver.recv_file(path).await });
 
-    let liar = UdpSocket::bind((common::LOCAL, 0)).await.expect("bind liar");
+    let liar = UdpSocket::bind((common::LOCAL, 0))
+        .await
+        .expect("bind liar");
     let destination = (group, port + 1);
     let transfer_id = 7;
 
