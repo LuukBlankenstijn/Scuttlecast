@@ -47,7 +47,6 @@ async fn multi_slice_transfer_to_three_receivers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "no pacing and no loss recovery: measured drops from ~700 blocks (1MB) upward, probabilistic, 3.5-4.1MB arriving out of 4MB"]
 async fn repeated_multi_megabyte_transfers() {
     let sent = common::payload(MULTI_MB);
 
@@ -58,7 +57,6 @@ async fn repeated_multi_megabyte_transfers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "same pacing limitation, and each receiver drops an independent subset of blocks"]
 async fn multi_megabyte_transfer_to_three_receivers() {
     let sent = common::payload(MULTI_MB);
     let output = common::Output::new();

@@ -11,9 +11,15 @@ use proto::{Data, Done, Hello, Message};
 use tokio::{io::AsyncRead, time::Instant};
 use tracing::debug;
 
-use crate::{BLOCK_SIZE, error::ProtoError, transport::MessageSocket};
+use crate::{
+    BLOCK_SIZE,
+    error::ProtoError,
+    sender::pacer::{Pacer, RateController, TICK_INTERVAL},
+    transport::MessageSocket,
+};
 
 mod blocks;
+mod pacer;
 
 #[derive(Builder)]
 pub struct Sender {
@@ -40,23 +46,66 @@ impl Sender {
     pub async fn send_stream(&self, reader: impl AsyncRead + Unpin) -> Result<(), ProtoError> {
         let transfer_id = rand::random();
 
-        let participants = self.gather_participants(transfer_id).await?;
+        let mut participants = self.gather_participants(transfer_id).await?;
         debug!("starting send with {} participants", participants.len());
 
         let mut block_no = 0;
         let mut stream = Box::pin(blocks::split(reader, BLOCK_SIZE));
         let mut total_bytes = 0;
-        while let Some(block) = stream.next().await {
-            let block = block.map_err(ProtoError::File)?;
-            total_bytes += block.len() as u64;
-            let message = Message::Data(Data {
-                transfer_id,
-                slice_no: Data::slice_no(block_no, self.blocks_per_slice),
-                block_in_slice: Data::block_in_slice(block_no, self.blocks_per_slice),
-                payload: block,
-            });
-            self.socket.send_to_group(message).await?;
-            block_no += 1;
+        let mut rate_controller = RateController::new();
+        let mut pacer = Pacer::new();
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        loop {
+            let rate = rate_controller.rate();
+            pacer.refill(rate);
+            let has_credit = pacer.has_credit();
+            let until_credit = pacer.time_until_credit(rate);
+
+            tokio::select! {
+                s = stream.next(), if has_credit => {
+                    let Some(block) = s else {
+                        break;
+                    };
+                    pacer.consume();
+
+                    let block = block.map_err(ProtoError::File)?;
+                    total_bytes += block.len() as u64;
+                    let message = Message::Data(Data {
+                        transfer_id,
+                        slice_no: Data::slice_no(block_no, self.blocks_per_slice),
+                        block_in_slice: Data::block_in_slice(block_no, self.blocks_per_slice),
+                        payload: block,
+                    });
+                    self.socket.send_to_group(message).await?;
+                    block_no += 1;
+                }
+
+                _ = tokio::time::sleep(until_credit), if !has_credit => {}
+
+                _ = tick.tick() => {
+                    rate_controller.tick(pacer.take_starvation());
+                },
+
+                m = self.socket.recv_in_transfer(transfer_id) => {
+                    let (message, _) = m?;
+                    match message {
+                        Message::Stats(stats) => {
+                            if !participants.contains_key(&stats.receiver_id) {
+                                continue;
+                            }
+                            rate_controller.on_report(
+                                stats.receiver_id,
+                                stats.blocks_received,
+                                stats.blocks_expected
+                            );
+                        }
+                        Message::Leave(_, participant_id) => {
+                            participants.remove(&participant_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
 
         let done_message = Message::Done(Done {
