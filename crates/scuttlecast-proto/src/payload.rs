@@ -1,6 +1,8 @@
 use bincode::{Decode, Encode};
 use derive_more::Display;
 
+use crate::error::Error;
+
 /// Sender -> Group, announces the transfer to the group
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -33,8 +35,18 @@ impl Data {
         (block_no % blocks_per_slice) as u16
     }
 
-    pub fn block_no(&self, blocks_per_slice: u32) -> u32 {
-        (self.slice_no * blocks_per_slice) + self.block_in_slice as u32
+    pub fn block_no(&self, blocks_per_slice: u32) -> Result<u64, Error> {
+        if blocks_per_slice == 0 {
+            return Err(Error::ZeroBlocksPerSlice);
+        }
+        if self.block_in_slice as u32 >= blocks_per_slice {
+            return Err(Error::BlockOutsideSlice {
+                block_in_slice: self.block_in_slice,
+                blocks_per_slice,
+            });
+        }
+
+        Ok(self.slice_no as u64 * blocks_per_slice as u64 + self.block_in_slice as u64)
     }
 }
 
@@ -56,13 +68,13 @@ pub struct Parity {
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
-    "Stats(transfer_id={transfer_id}, receiver_id={receiver_id}, received_since_last={received_since_last}, expected_since_last={expected_since_last})"
+    "Stats(transfer_id={transfer_id}, receiver_id={receiver_id}, blocks_received={blocks_received}, blocks_expected={blocks_expected})"
 )]
 pub struct Stats {
     pub transfer_id: u64,
     pub receiver_id: u64,
-    pub received_since_last: u32,
-    pub expected_since_last: u32,
+    pub blocks_received: u64,
+    pub blocks_expected: u64,
 }
 
 /// Receiver -> Sender, request a missing block from the Sender
@@ -94,19 +106,68 @@ pub struct Done {
 #[cfg(test)]
 mod tests {
     use super::Data;
+    use crate::error::Error;
     use proptest::prelude::*;
+
+    fn data(slice_no: u32, block_in_slice: u16) -> Data {
+        Data {
+            transfer_id: 0,
+            slice_no,
+            block_in_slice,
+            payload: Vec::new(),
+        }
+    }
 
     proptest! {
         #[test]
         fn block_no_inverts_slice_coordinates(block_no: u32, blocks_per_slice in 1u32..=u16::MAX as u32) {
-            let data = Data {
-                transfer_id: 0,
-                slice_no: Data::slice_no(block_no, blocks_per_slice),
-                block_in_slice: Data::block_in_slice(block_no, blocks_per_slice),
-                payload: Vec::new(),
-            };
+            let data = data(
+                Data::slice_no(block_no, blocks_per_slice),
+                Data::block_in_slice(block_no, blocks_per_slice),
+            );
 
-            prop_assert_eq!(data.block_no(blocks_per_slice), block_no);
+            prop_assert_eq!(data.block_no(blocks_per_slice).unwrap(), block_no as u64);
         }
+
+        #[test]
+        fn any_slice_number_is_addressable(slice_no: u32, blocks_per_slice in 1u32..=u16::MAX as u32) {
+            let block_in_slice = (blocks_per_slice - 1).min(u16::MAX as u32) as u16;
+            let expected = slice_no as u64 * blocks_per_slice as u64 + block_in_slice as u64;
+
+            prop_assert_eq!(data(slice_no, block_in_slice).block_no(blocks_per_slice).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn largest_coordinates_do_not_overflow() {
+        let blocks_per_slice = u16::MAX as u32;
+        let block_in_slice = u16::MAX - 1;
+        let expected = u32::MAX as u64 * blocks_per_slice as u64 + block_in_slice as u64;
+
+        assert_eq!(
+            data(u32::MAX, block_in_slice)
+                .block_no(blocks_per_slice)
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rejects_zero_blocks_per_slice() {
+        assert!(matches!(
+            data(0, 0).block_no(0),
+            Err(Error::ZeroBlocksPerSlice)
+        ));
+    }
+
+    #[test]
+    fn rejects_block_index_outside_its_slice() {
+        assert!(matches!(
+            data(0, 32).block_no(32),
+            Err(Error::BlockOutsideSlice {
+                block_in_slice: 32,
+                blocks_per_slice: 32
+            })
+        ));
     }
 }

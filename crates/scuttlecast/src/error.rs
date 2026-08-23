@@ -17,6 +17,9 @@ pub enum ProtoError {
     #[error("expected {expected} bytes, received {received}")]
     ByteCountMismatch { expected: u64, received: u64 },
 
+    #[error("block {block_no} lies beyond the addressable byte range")]
+    BlockOutOfRange { block_no: u64 },
+
     #[error("Timeout: {0}")]
     Timeout(String),
 }

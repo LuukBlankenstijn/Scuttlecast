@@ -3,8 +3,8 @@ use tokio::sync::mpsc;
 
 #[derive(Debug)]
 pub struct Reorderer {
-    next_block: u32,
-    pending: BTreeMap<u32, Vec<u8>>,
+    next_block: u64,
+    pending: BTreeMap<u64, Vec<u8>>,
     tx: mpsc::Sender<Vec<u8>>,
 }
 
@@ -21,7 +21,7 @@ impl Reorderer {
             rx,
         )
     }
-    pub async fn on_block(&mut self, block_no: u32, payload: Vec<u8>) {
+    pub async fn on_block(&mut self, block_no: u64, payload: Vec<u8>) {
         if block_no < self.next_block {
             return;
         }
