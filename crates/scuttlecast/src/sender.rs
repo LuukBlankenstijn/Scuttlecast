@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, SocketAddr},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 
 use bon::Builder;
 use futures_util::StreamExt;
@@ -14,10 +9,12 @@ use tracing::debug;
 use crate::{
     BLOCK_SIZE,
     error::ProtoError,
+    sender::group::Group,
     sender::pacer::{Pacer, RateController, TICK_INTERVAL},
     transport::MessageSocket,
 };
 
+mod group;
 mod pacer;
 mod slicer;
 
@@ -46,8 +43,8 @@ impl Sender {
     pub async fn send_stream(&self, reader: impl AsyncRead + Unpin) -> Result<(), ProtoError> {
         let transfer_id = rand::random();
 
-        let mut participants = self.gather_participants(transfer_id).await?;
-        debug!("starting send with {} participants", participants.len());
+        let mut group = self.gather_participants(transfer_id).await?;
+        debug!("starting send with {} participants", group.len());
 
         let mut block_no = 0;
         let mut stream = Box::pin(slicer::blocks::split(reader, BLOCK_SIZE));
@@ -90,9 +87,10 @@ impl Sender {
                     let (message, _) = m?;
                     match message {
                         Message::Stats(stats) => {
-                            if !participants.contains_key(&stats.receiver_id) {
+                            if !group.contains(stats.receiver_id) {
                                 continue;
                             }
+                            group.on_stats(&stats);
                             rate_controller.on_report(
                                 stats.receiver_id,
                                 stats.blocks_received,
@@ -100,7 +98,7 @@ impl Sender {
                             );
                         }
                         Message::Leave(_, participant_id) => {
-                            participants.remove(&participant_id);
+                            group.leave(participant_id);
                         }
                         _ => {}
                     }
@@ -118,11 +116,8 @@ impl Sender {
         Ok(())
     }
 
-    async fn gather_participants(
-        &self,
-        transfer_id: u64,
-    ) -> Result<HashMap<u64, SocketAddr>, ProtoError> {
-        let mut participants = HashMap::new();
+    async fn gather_participants(&self, transfer_id: u64) -> Result<Group, ProtoError> {
+        let mut group = Group::default();
         let start = Instant::now();
         let deadline = start + self.max_wait;
         let mut hello_tick = tokio::time::interval(Duration::from_millis(200));
@@ -140,10 +135,10 @@ impl Sender {
 
                 r = self.socket.recv_in_transfer(transfer_id) => {
                     let (message, socket) = r?;
-                    if let Message::Join(_, receiver_id) = message && participants.insert(receiver_id, socket).is_none() {
+                    if let Message::Join(_, receiver_id) = message && group.join(receiver_id) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver joined");
                     }
-                    if let Message::Leave(_, receiver_id) = message && participants.remove(&receiver_id).is_some() {
+                    if let Message::Leave(_, receiver_id) = message && group.leave(receiver_id) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver left");
                     }
                 },
@@ -151,10 +146,10 @@ impl Sender {
                 _ = tokio::time::sleep_until(deadline) => break,
             }
 
-            if Some(participants.len()) >= self.min_receivers {
+            if Some(group.len()) >= self.min_receivers {
                 break;
             }
         }
-        Ok(participants)
+        Ok(group)
     }
 }
