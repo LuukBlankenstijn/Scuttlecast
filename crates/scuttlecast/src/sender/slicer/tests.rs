@@ -4,14 +4,14 @@ use crate::{BLOCK_SIZE, error::ProtoError};
 use std::num::{NonZeroU16, NonZeroUsize};
 use tokio::sync::mpsc;
 
-fn slicer(shards_per_slice: u16) -> Slicer {
+fn slicer(blocks_per_slice: u16) -> Slicer {
     Slicer::new(
-        NonZeroU16::new(shards_per_slice).expect("shards per slice"),
+        NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
         NonZeroUsize::new(32).expect("max live slices"),
     )
 }
 
-async fn run(input: &[u8], shards_per_slice: u16) -> Vec<Outbound> {
+async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
     let (outbound, mut collected) = mpsc::channel(256);
     let (feedback, feedback_rx) = mpsc::channel(4);
 
@@ -27,7 +27,49 @@ async fn run(input: &[u8], shards_per_slice: u16) -> Vec<Outbound> {
         seen
     });
 
-    slicer(shards_per_slice)
+    slicer(blocks_per_slice)
+        .run(input, outbound, feedback_rx)
+        .await
+        .expect("run");
+
+    collecting.await.expect("collect")
+}
+
+/// Feeds the requests once the whole input has been sent, then collects the
+/// coordinates of everything the slicer sends afterwards
+async fn resent_blocks(
+    input: &[u8],
+    blocks_per_slice: u16,
+    mut requests: Vec<Feedback>,
+) -> Vec<(u32, u16)> {
+    let (outbound, mut collected) = mpsc::channel(256);
+    let (feedback, feedback_rx) = mpsc::channel(8);
+
+    let collecting = tokio::spawn(async move {
+        let mut resent = Vec::new();
+        let mut past_eof = false;
+
+        while let Some(message) = collected.recv().await {
+            match message {
+                Outbound::Eof { .. } => {
+                    for request in requests.drain(..) {
+                        feedback.send(request).await.expect("request");
+                    }
+                    past_eof = true;
+                    feedback.send(Feedback::Done).await.expect("done");
+                }
+                Outbound::Block {
+                    slice_no,
+                    block_in_slice,
+                    ..
+                } if past_eof => resent.push((slice_no, block_in_slice)),
+                Outbound::Block { .. } => {}
+            }
+        }
+        resent
+    });
+
+    slicer(blocks_per_slice)
         .run(input, outbound, feedback_rx)
         .await
         .expect("run");
@@ -45,16 +87,15 @@ fn totals(messages: &[Outbound]) -> (u64, u64) {
     }
 }
 
-fn coordinates(messages: &[Outbound]) -> Vec<(u32, u16, Option<u32>)> {
+fn coordinates(messages: &[Outbound]) -> Vec<(u32, u16)> {
     messages
         .iter()
         .filter_map(|message| match message {
             Outbound::Block {
                 slice_no,
-                shard_in_slice,
-                sealed_through,
+                block_in_slice,
                 ..
-            } => Some((*slice_no, *shard_in_slice, *sealed_through)),
+            } => Some((*slice_no, *block_in_slice)),
             Outbound::Eof { .. } => None,
         })
         .collect()
@@ -65,10 +106,7 @@ async fn reports_eof_when_the_last_slice_lands_exactly_full() {
     let messages = run(&vec![7u8; 4 * BLOCK_SIZE], 2).await;
 
     assert_eq!(totals(&messages), (4 * BLOCK_SIZE as u64, 4));
-    assert_eq!(
-        coordinates(&messages),
-        vec![(0, 0, None), (0, 1, None), (1, 0, Some(0)), (1, 1, Some(0)),]
-    );
+    assert_eq!(coordinates(&messages), vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -84,16 +122,6 @@ async fn reports_eof_for_empty_input() {
 
     assert!(coordinates(&messages).is_empty());
     assert_eq!(totals(&messages), (0, 0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_short_final_slice_is_never_sealed() {
-    let messages = run(&vec![7u8; 3 * BLOCK_SIZE], 2).await;
-
-    assert_eq!(
-        coordinates(&messages).last().copied(),
-        Some((1, 0, Some(0)))
-    );
 }
 
 #[tokio::test]
@@ -127,85 +155,49 @@ async fn a_closed_feedback_channel_stops_the_slicer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resends_retained_shards() {
-    let (outbound, mut collected) = mpsc::channel(256);
-    let (feedback, feedback_rx) = mpsc::channel(4);
+async fn resends_requested_blocks_and_ignores_the_rest() {
+    let resent = resent_blocks(
+        &vec![7u8; 2 * BLOCK_SIZE],
+        2,
+        vec![Feedback::Resend {
+            slice_no: 0,
+            blocks: vec![1, 9],
+        }],
+    )
+    .await;
 
-    let requesting = tokio::spawn(async move {
-        let mut resent = Vec::new();
-        let mut requested = false;
-
-        while let Some(message) = collected.recv().await {
-            match message {
-                Outbound::Eof { .. } => {
-                    feedback
-                        .send(Feedback::Resend {
-                            slice_no: 0,
-                            shards: vec![1, 9],
-                        })
-                        .await
-                        .expect("resend");
-                    requested = true;
-                }
-                Outbound::Block {
-                    slice_no,
-                    shard_in_slice,
-                    ..
-                } if requested => {
-                    resent.push((slice_no, shard_in_slice));
-                    feedback.send(Feedback::Done).await.expect("done");
-                }
-                Outbound::Block { .. } => {}
-            }
-        }
-        resent
-    });
-
-    slicer(2)
-        .run(&vec![7u8; 2 * BLOCK_SIZE][..], outbound, feedback_rx)
-        .await
-        .expect("run");
-
-    assert_eq!(requesting.await.expect("collect"), vec![(0, 1)]);
+    assert_eq!(resent, vec![(0, 1)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_watermark_drops_retained_slices() {
-    let (outbound, mut collected) = mpsc::channel(256);
-    let (feedback, feedback_rx) = mpsc::channel(4);
+async fn resends_blocks_of_a_short_final_slice() {
+    let resent = resent_blocks(
+        &vec![7u8; 3 * BLOCK_SIZE],
+        2,
+        vec![Feedback::Resend {
+            slice_no: 1,
+            blocks: vec![0],
+        }],
+    )
+    .await;
 
-    let requesting = tokio::spawn(async move {
-        let mut resent_after_watermark = 0;
-        let mut watermarked = false;
+    assert_eq!(resent, vec![(1, 0)]);
+}
 
-        while let Some(message) = collected.recv().await {
-            match message {
-                Outbound::Eof { .. } => {
-                    feedback
-                        .send(Feedback::Watermark(1))
-                        .await
-                        .expect("watermark");
-                    feedback
-                        .send(Feedback::Resend {
-                            slice_no: 0,
-                            shards: vec![0],
-                        })
-                        .await
-                        .expect("resend");
-                    feedback.send(Feedback::Done).await.expect("done");
-                    watermarked = true;
-                }
-                Outbound::Block { .. } if watermarked => resent_after_watermark += 1,
-                Outbound::Block { .. } => {}
-            }
-        }
-        resent_after_watermark
-    });
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completed_slice_is_no_longer_resent() {
+    let resent = resent_blocks(
+        &vec![7u8; 2 * BLOCK_SIZE],
+        2,
+        vec![
+            Feedback::Completed(0),
+            Feedback::Resend {
+                slice_no: 0,
+                blocks: vec![0],
+            },
+        ],
+    )
+    .await;
 
-    slicer(2)
-        .run(&vec![7u8; 2 * BLOCK_SIZE][..], outbound, feedback_rx)
-        .await
-        .expect("run");
-
-    assert_eq!(requesting.await.expect("collect"), 0);
+    assert!(resent.is_empty(), "{resent:?}");
 }
