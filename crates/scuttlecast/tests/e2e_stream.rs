@@ -83,7 +83,7 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
 
     send(Message::Hello(Hello {
         transfer_id,
-        blocks_per_slice: 32,
+        blocks_per_slice: std::num::NonZeroU16::new(32).expect("nonzero"),
     }))
     .await;
     send(Message::Data(Data {

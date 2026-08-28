@@ -111,9 +111,12 @@ impl Rogue {
     }
 
     pub async fn send(&self, message: Message) {
-        let bytes = message.encode().expect("encode");
+        self.send_bytes(&message.encode().expect("encode")).await;
+    }
+
+    pub async fn send_bytes(&self, bytes: &[u8]) {
         self.socket
-            .send_to(&bytes, self.destination)
+            .send_to(bytes, self.destination)
             .await
             .expect("send");
     }

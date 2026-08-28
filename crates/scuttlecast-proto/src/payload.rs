@@ -1,3 +1,5 @@
+use std::num::NonZeroU16;
+
 use bincode::{
     Decode, Encode,
     de::Decoder,
@@ -48,7 +50,7 @@ impl proptest::arbitrary::Arbitrary for Payload {
 #[display("Hello(transfer_id={transfer_id}, blocks_per_slice={blocks_per_slice})")]
 pub struct Hello {
     pub transfer_id: u64,
-    pub blocks_per_slice: u32,
+    pub blocks_per_slice: NonZeroU16,
 }
 
 /// Sender -> Group, one block of data
@@ -66,26 +68,23 @@ pub struct Data {
 }
 
 impl Data {
-    pub fn slice_no(block_no: u32, blocks_per_slice: u32) -> u32 {
-        block_no / blocks_per_slice
+    pub fn slice_no(block_no: u32, blocks_per_slice: NonZeroU16) -> u32 {
+        block_no / blocks_per_slice.get() as u32
     }
 
-    pub fn block_in_slice(block_no: u32, blocks_per_slice: u32) -> u16 {
-        (block_no % blocks_per_slice) as u16
+    pub fn block_in_slice(block_no: u32, blocks_per_slice: NonZeroU16) -> u16 {
+        (block_no % blocks_per_slice.get() as u32) as u16
     }
 
-    pub fn block_no(&self, blocks_per_slice: u32) -> Result<u64, Error> {
-        if blocks_per_slice == 0 {
-            return Err(Error::ZeroBlocksPerSlice);
-        }
-        if self.block_in_slice as u32 >= blocks_per_slice {
+    pub fn block_no(&self, blocks_per_slice: NonZeroU16) -> Result<u64, Error> {
+        if self.block_in_slice >= blocks_per_slice.get() {
             return Err(Error::BlockOutsideSlice {
                 block_in_slice: self.block_in_slice,
                 blocks_per_slice,
             });
         }
 
-        Ok(self.slice_no as u64 * blocks_per_slice as u64 + self.block_in_slice as u64)
+        Ok(self.slice_no as u64 * blocks_per_slice.get() as u64 + self.block_in_slice as u64)
     }
 }
 
@@ -156,9 +155,13 @@ pub struct Done {
 
 #[cfg(test)]
 mod tests {
-    use super::{Data, Payload};
+    use super::{Data, NonZeroU16, Payload};
     use crate::error::Error;
     use proptest::prelude::*;
+
+    fn blocks_per_slice(blocks: u16) -> NonZeroU16 {
+        NonZeroU16::new(blocks).expect("nonzero blocks per slice")
+    }
 
     fn data(slice_no: u32, block_in_slice: u16) -> Data {
         Data {
@@ -171,7 +174,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn block_no_inverts_slice_coordinates(block_no: u32, blocks_per_slice in 1u32..=u16::MAX as u32) {
+        fn block_no_inverts_slice_coordinates(block_no: u32, blocks_per_slice: NonZeroU16) {
             let data = data(
                 Data::slice_no(block_no, blocks_per_slice),
                 Data::block_in_slice(block_no, blocks_per_slice),
@@ -181,9 +184,9 @@ mod tests {
         }
 
         #[test]
-        fn any_slice_number_is_addressable(slice_no: u32, blocks_per_slice in 1u32..=u16::MAX as u32) {
-            let block_in_slice = (blocks_per_slice - 1).min(u16::MAX as u32) as u16;
-            let expected = slice_no as u64 * blocks_per_slice as u64 + block_in_slice as u64;
+        fn any_slice_number_is_addressable(slice_no: u32, blocks_per_slice: NonZeroU16) {
+            let block_in_slice = blocks_per_slice.get() - 1;
+            let expected = slice_no as u64 * blocks_per_slice.get() as u64 + block_in_slice as u64;
 
             prop_assert_eq!(data(slice_no, block_in_slice).block_no(blocks_per_slice).unwrap(), expected);
         }
@@ -191,9 +194,9 @@ mod tests {
 
     #[test]
     fn largest_coordinates_do_not_overflow() {
-        let blocks_per_slice = u16::MAX as u32;
+        let blocks_per_slice = blocks_per_slice(u16::MAX);
         let block_in_slice = u16::MAX - 1;
-        let expected = u32::MAX as u64 * blocks_per_slice as u64 + block_in_slice as u64;
+        let expected = u32::MAX as u64 * blocks_per_slice.get() as u64 + block_in_slice as u64;
 
         assert_eq!(
             data(u32::MAX, block_in_slice)
@@ -204,21 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_blocks_per_slice() {
-        assert!(matches!(
-            data(0, 0).block_no(0),
-            Err(Error::ZeroBlocksPerSlice)
-        ));
-    }
-
-    #[test]
     fn rejects_block_index_outside_its_slice() {
         assert!(matches!(
-            data(0, 32).block_no(32),
+            data(0, 32).block_no(blocks_per_slice(32)),
             Err(Error::BlockOutsideSlice {
                 block_in_slice: 32,
-                blocks_per_slice: 32
-            })
+                blocks_per_slice
+            }) if blocks_per_slice.get() == 32
         ));
     }
 }

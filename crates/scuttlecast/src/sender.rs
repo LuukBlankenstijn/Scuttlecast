@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
+use std::{net::Ipv4Addr, num::NonZeroU16, path::PathBuf, time::Duration};
 
 use bon::Builder;
 use futures_util::StreamExt;
@@ -18,6 +18,8 @@ mod group;
 mod pacer;
 mod slicer;
 
+const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
+
 #[derive(Builder)]
 pub struct Sender {
     #[builder(with = |local_ip: Ipv4Addr, group_ip: Ipv4Addr, port: u16,| -> Result<_, ProtoError> {
@@ -27,8 +29,8 @@ pub struct Sender {
     #[builder(default = Duration::new(5 * 60, 0))]
     max_wait: Duration,
     min_receivers: Option<usize>,
-    #[builder(default = 32)]
-    blocks_per_slice: u32,
+    #[builder(default = DEFAULT_BLOCKS_PER_SLICE)]
+    blocks_per_slice: NonZeroU16,
 }
 
 impl Sender {
