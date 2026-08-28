@@ -111,7 +111,7 @@ impl Sender {
         let done_message = Message::Done(Done {
             transfer_id,
             total_bytes,
-            total_blocks: block_no,
+            total_blocks: block_no.into(),
         });
         self.socket.send_to_group(done_message).await?;
 

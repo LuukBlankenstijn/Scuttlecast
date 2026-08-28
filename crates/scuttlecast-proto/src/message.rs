@@ -3,7 +3,7 @@ use bincode::{Decode, Encode};
 use derive_more::Display;
 
 use crate::error::Error;
-use crate::payload::{Data, Done, Hello, Nack, Parity, Stats};
+use crate::payload::{Complete, Data, Done, Hello, Nack, Parity, Stats};
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -19,6 +19,7 @@ pub enum Message {
     Parity(Parity),
     Stats(Stats),
     Nack(Nack),
+    Complete(Complete),
     Done(Done),
 }
 
@@ -32,6 +33,7 @@ impl Message {
             Message::Parity(parity) => parity.transfer_id,
             Message::Stats(stats) => stats.transfer_id,
             Message::Nack(nack) => nack.transfer_id,
+            Message::Complete(complete) => complete.transfer_id,
             Message::Done(done) => done.transfer_id,
         }
     }

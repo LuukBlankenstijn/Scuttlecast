@@ -103,17 +103,20 @@ pub struct Parity {
     pub payload: Payload,
 }
 
-/// Receiver -> Sender, used to feed the rate controller
+/// Receiver -> Sender, feeds the rate controller and the retransmit window.
+/// `completed_through` is the highest slice the receiver holds in full, with
+/// every slice below it complete as well.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
-    "Stats(transfer_id={transfer_id}, receiver_id={receiver_id}, blocks_received={blocks_received}, blocks_expected={blocks_expected})"
+    "Stats(transfer_id={transfer_id}, receiver_id={receiver_id}, blocks_received={blocks_received}, blocks_expected={blocks_expected}, completed_through={completed_through:?})"
 )]
 pub struct Stats {
     pub transfer_id: u64,
     pub receiver_id: u64,
     pub blocks_received: u64,
     pub blocks_expected: u64,
+    pub completed_through: Option<u32>,
 }
 
 /// Receiver -> Sender, request a missing block from the Sender
@@ -130,6 +133,15 @@ pub struct Nack {
     pub missing: Vec<u16>,
 }
 
+/// Receiver -> Sender, announces the receiver holds the whole transfer
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
+#[display("Complete(transfer_id={transfer_id}, receiver_id={receiver_id})")]
+pub struct Complete {
+    pub transfer_id: u64,
+    pub receiver_id: u64,
+}
+
 /// Sender -> Group, announces the transfer is done
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -139,7 +151,7 @@ pub struct Nack {
 pub struct Done {
     pub transfer_id: u64,
     pub total_bytes: u64,
-    pub total_blocks: u32,
+    pub total_blocks: u64,
 }
 
 #[cfg(test)]

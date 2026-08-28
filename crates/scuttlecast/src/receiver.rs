@@ -66,7 +66,8 @@ impl Receiver {
                     transfer_id,
                     receiver_id,
                     blocks_received: block_counter.number_of_blocks_seen(),
-                    blocks_expected: block_counter.highest_block_seen().map(|n| n + 1).unwrap_or(0)
+                    blocks_expected: block_counter.highest_block_seen().map(|n| n + 1).unwrap_or(0),
+                    completed_through: None
                 });
                 self.socket.send_to(message, sender_socket).await?
             }
