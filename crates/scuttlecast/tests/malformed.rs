@@ -2,6 +2,7 @@ mod common;
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use proto::{Data, Hello, Message};
 use scuttlecast::error::ProtoError;
 
@@ -39,7 +40,7 @@ async fn rejects_block_index_outside_its_slice() {
             transfer_id: 1,
             slice_no: 0,
             block_in_slice: 32,
-            payload: vec![1; 10],
+            payload: Bytes::from(vec![1; 10]).into(),
         }))
         .await;
 
@@ -75,7 +76,7 @@ async fn rejects_zero_blocks_per_slice() {
             transfer_id: 2,
             slice_no: 0,
             block_in_slice: 0,
-            payload: vec![1; 10],
+            payload: Bytes::from(vec![1; 10]).into(),
         }))
         .await;
 
@@ -108,7 +109,7 @@ async fn rejects_a_block_whose_offset_would_overflow() {
             transfer_id: 4,
             slice_no: u32::MAX,
             block_in_slice: 0,
-            payload: vec![1; 10],
+            payload: Bytes::from(vec![1; 10]).into(),
         }))
         .await;
 

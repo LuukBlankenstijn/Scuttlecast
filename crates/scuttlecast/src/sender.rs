@@ -18,8 +18,8 @@ use crate::{
     transport::MessageSocket,
 };
 
-mod blocks;
 mod pacer;
+mod slicer;
 
 #[derive(Builder)]
 pub struct Sender {
@@ -50,7 +50,7 @@ impl Sender {
         debug!("starting send with {} participants", participants.len());
 
         let mut block_no = 0;
-        let mut stream = Box::pin(blocks::split(reader, BLOCK_SIZE));
+        let mut stream = Box::pin(slicer::blocks::split(reader, BLOCK_SIZE));
         let mut total_bytes = 0;
         let mut rate_controller = RateController::new();
         let mut pacer = Pacer::new();
@@ -74,7 +74,7 @@ impl Sender {
                         transfer_id,
                         slice_no: Data::slice_no(block_no, self.blocks_per_slice),
                         block_in_slice: Data::block_in_slice(block_no, self.blocks_per_slice),
-                        payload: block,
+                        payload: block.into(),
                     });
                     self.socket.send_to_group(message).await?;
                     block_no += 1;

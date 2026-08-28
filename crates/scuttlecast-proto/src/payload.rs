@@ -1,7 +1,46 @@
-use bincode::{Decode, Encode};
-use derive_more::Display;
+use bincode::{
+    Decode, Encode,
+    de::Decoder,
+    enc::Encoder,
+    error::{DecodeError, EncodeError},
+};
+use bytes::Bytes;
+use derive_more::{Deref, Display, From, Into};
 
 use crate::error::Error;
+
+/// Block payload, encoded as a length-prefixed byte slice
+#[derive(Debug, Clone, PartialEq, Deref, From, Into, Display)]
+#[display("{} bytes", _0.len())]
+pub struct Payload(Bytes);
+
+impl Encode for Payload {
+    fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        self.0.as_ref().encode(encoder)
+    }
+}
+
+impl<Context> Decode<Context> for Payload {
+    fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        Ok(Self(Vec::<u8>::decode(decoder)?.into()))
+    }
+}
+
+bincode::impl_borrow_decode!(Payload);
+
+#[cfg(test)]
+impl proptest::arbitrary::Arbitrary for Payload {
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<Self>;
+
+    fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::{Strategy, any};
+
+        any::<Vec<u8>>()
+            .prop_map(|bytes| Self(bytes.into()))
+            .boxed()
+    }
+}
 
 /// Sender -> Group, announces the transfer to the group
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
@@ -23,7 +62,7 @@ pub struct Data {
     pub transfer_id: u64,
     pub slice_no: u32,
     pub block_in_slice: u16,
-    pub payload: Vec<u8>,
+    pub payload: Payload,
 }
 
 impl Data {
@@ -61,7 +100,7 @@ pub struct Parity {
     pub transfer_id: u64,
     pub slice_no: u32,
     pub parity_index: u16,
-    pub payload: Vec<u8>,
+    pub payload: Payload,
 }
 
 /// Receiver -> Sender, used to feed the rate controller
@@ -105,7 +144,7 @@ pub struct Done {
 
 #[cfg(test)]
 mod tests {
-    use super::Data;
+    use super::{Data, Payload};
     use crate::error::Error;
     use proptest::prelude::*;
 
@@ -114,7 +153,7 @@ mod tests {
             transfer_id: 0,
             slice_no,
             block_in_slice,
-            payload: Vec::new(),
+            payload: Payload::from(bytes::Bytes::new()),
         }
     }
 

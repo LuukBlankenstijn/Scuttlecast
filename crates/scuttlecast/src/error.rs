@@ -22,4 +22,7 @@ pub enum ProtoError {
 
     #[error("Timeout: {0}")]
     Timeout(String),
+
+    #[error("the pacer stopped consuming outbound blocks")]
+    EgressClosed,
 }

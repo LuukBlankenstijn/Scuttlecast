@@ -2,6 +2,7 @@ mod common;
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use proto::{Data, Done, Hello, Message};
 use scuttlecast::BLOCK_SIZE;
 use scuttlecast::error::ProtoError;
@@ -89,7 +90,7 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
         transfer_id,
         slice_no: 0,
         block_in_slice: 0,
-        payload: vec![1; 100],
+        payload: Bytes::from(vec![1; 100]).into(),
     }))
     .await;
     send(Message::Done(Done {

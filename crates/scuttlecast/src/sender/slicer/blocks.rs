@@ -1,12 +1,13 @@
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub(crate) fn split<R: AsyncRead + Unpin>(
     mut reader: R,
     block_size: usize,
-) -> impl futures_core::Stream<Item = std::io::Result<Vec<u8>>> {
+) -> impl futures_core::Stream<Item = std::io::Result<Bytes>> {
     async_stream::stream! {
         loop {
-            let mut buf = vec![0u8; block_size];
+            let mut buf = BytesMut::zeroed(block_size);
             let mut filled = 0;
 
             while filled < block_size {
@@ -19,7 +20,7 @@ pub(crate) fn split<R: AsyncRead + Unpin>(
 
             if filled == 0 { break; }
             buf.truncate(filled);
-            yield Ok(buf);
+            yield Ok(buf.freeze());
         }
     }
 }
@@ -35,7 +36,7 @@ mod tests {
 
     async fn collect(reader: impl AsyncRead + Unpin, block_size: usize) -> Vec<Vec<u8>> {
         Box::pin(split(reader, block_size))
-            .map(|block| block.expect("block"))
+            .map(|block| block.expect("block").to_vec())
             .collect()
             .await
     }

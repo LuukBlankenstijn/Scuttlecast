@@ -16,8 +16,9 @@ use crate::{
     transport::MessageSocket,
 };
 use bon::Builder;
+use bytes::Bytes;
 use proto::{
-    Done, Hello,
+    Hello,
     Message::{self, Join},
     Stats,
 };
@@ -42,7 +43,7 @@ impl Receiver {
         self.recv(sink).await
     }
 
-    pub async fn recv_stream(&self) -> Result<mpsc::Receiver<Vec<u8>>, ProtoError> {
+    pub async fn recv_stream(&self) -> Result<mpsc::Receiver<Bytes>, ProtoError> {
         let (reorderer, rx) = Reorderer::new();
         let sink = StreamSink::new(reorderer);
         self.recv(sink).await?;
@@ -84,7 +85,7 @@ impl Receiver {
                             .checked_mul(BLOCK_SIZE as u64)
                             .ok_or(ProtoError::BlockOutOfRange { block_no })?;
                         received_bytes += data.payload.len() as u64;
-                        sink.write(block_no, offset, &data.payload)
+                        sink.write(block_no, offset, data.payload.into())
                             .await
                             .map_err(ProtoError::File)?;
                         block_counter.insert(block_no);

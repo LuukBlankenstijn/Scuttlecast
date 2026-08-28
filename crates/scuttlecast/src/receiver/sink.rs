@@ -1,11 +1,12 @@
 use std::{io, os::unix::fs::FileExt};
 
+use bytes::Bytes;
 use derive_more::Constructor;
 
 use crate::receiver::reorderer::Reorderer;
 
 pub trait Sink {
-    async fn write(&mut self, block_no: u64, offset: u64, bytes: &[u8]) -> io::Result<()>;
+    async fn write(&mut self, block_no: u64, offset: u64, payload: Bytes) -> io::Result<()>;
     async fn finish(&mut self) -> io::Result<()>;
 }
 
@@ -14,8 +15,8 @@ pub struct FileSink {
     file: std::fs::File,
 }
 impl Sink for FileSink {
-    async fn write(&mut self, _block_no: u64, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        self.file.write_all_at(bytes, offset)
+    async fn write(&mut self, _block_no: u64, offset: u64, payload: Bytes) -> io::Result<()> {
+        self.file.write_all_at(&payload, offset)
     }
 
     async fn finish(&mut self) -> io::Result<()> {
@@ -28,8 +29,8 @@ pub struct StreamSink {
     reorderer: Reorderer,
 }
 impl Sink for StreamSink {
-    async fn write(&mut self, block_no: u64, _offset: u64, bytes: &[u8]) -> io::Result<()> {
-        self.reorderer.on_block(block_no, bytes.to_vec()).await;
+    async fn write(&mut self, block_no: u64, _offset: u64, payload: Bytes) -> io::Result<()> {
+        self.reorderer.on_block(block_no, payload).await;
         Ok(())
     }
 
@@ -42,6 +43,7 @@ impl Sink for StreamSink {
 #[cfg(test)]
 mod tests {
     use super::{FileSink, Sink};
+    use bytes::Bytes;
     use std::fs;
 
     fn sink(path: &std::path::Path) -> FileSink {
@@ -54,9 +56,15 @@ mod tests {
         let path = dir.path().join("out.bin");
         let mut sink = sink(&path);
 
-        sink.write(2, 8, b"CCCC").await.expect("write");
-        sink.write(0, 0, b"AAAA").await.expect("write");
-        sink.write(1, 4, b"BBBB").await.expect("write");
+        sink.write(2, 8, Bytes::from_static(b"CCCC"))
+            .await
+            .expect("write");
+        sink.write(0, 0, Bytes::from_static(b"AAAA"))
+            .await
+            .expect("write");
+        sink.write(1, 4, Bytes::from_static(b"BBBB"))
+            .await
+            .expect("write");
         sink.finish().await.expect("finish");
 
         assert_eq!(fs::read(&path).expect("read"), b"AAAABBBBCCCC");
@@ -68,8 +76,12 @@ mod tests {
         let path = dir.path().join("out.bin");
         let mut sink = sink(&path);
 
-        sink.write(0, 0, b"AAAA").await.expect("write");
-        sink.write(1, 4, b"BB").await.expect("write");
+        sink.write(0, 0, Bytes::from_static(b"AAAA"))
+            .await
+            .expect("write");
+        sink.write(1, 4, Bytes::from_static(b"BB"))
+            .await
+            .expect("write");
         sink.finish().await.expect("finish");
 
         assert_eq!(fs::read(&path).expect("read"), b"AAAABB");
@@ -81,8 +93,12 @@ mod tests {
         let path = dir.path().join("out.bin");
         let mut sink = sink(&path);
 
-        sink.write(0, 0, b"AAAA").await.expect("write");
-        sink.write(2, 8, b"CCCC").await.expect("write");
+        sink.write(0, 0, Bytes::from_static(b"AAAA"))
+            .await
+            .expect("write");
+        sink.write(2, 8, Bytes::from_static(b"CCCC"))
+            .await
+            .expect("write");
         sink.finish().await.expect("finish");
 
         assert_eq!(fs::read(&path).expect("read"), b"AAAA\0\0\0\0CCCC");
