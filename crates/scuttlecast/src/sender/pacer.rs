@@ -29,7 +29,7 @@ const MAX_BURST: f64 = 4096.0;
 pub struct Pacer {
     credit: f64,
     last_refill: Instant,
-    starved: bool,
+    waited: bool,
 }
 
 impl Pacer {
@@ -37,7 +37,7 @@ impl Pacer {
         Self {
             credit: 0.0,
             last_refill: Instant::now(),
-            starved: false,
+            waited: false,
         }
     }
 
@@ -46,17 +46,20 @@ impl Pacer {
         let earned = now.duration_since(self.last_refill).as_secs_f64() * rate;
         self.credit = (self.credit + earned).min(burst_cap(rate));
         self.last_refill = now;
-        self.starved |= self.credit < 1.0;
     }
 
-    pub fn has_credit(&self) -> bool {
-        self.credit >= 1.0
+    /// Records that traffic was ready and the pacer made it wait, which is
+    /// what makes the allowance the constraint rather than the sender. A pass
+    /// spends only what the moment offers, so credit left over says nothing:
+    /// having had to wait for it does.
+    pub fn waited(&mut self) {
+        self.waited = true;
     }
 
-    /// Whole blocks the pacer will allow right now, so a sender can take a
-    /// batch in one go rather than asking once per block
+    /// Whole blocks the pacer will allow right now, so a pass can take a batch
+    /// in one go rather than asking once per block
     pub fn budget(&self) -> usize {
-        self.credit.max(0.0) as usize
+        self.credit as usize
     }
 
     pub fn consume(&mut self) {
@@ -64,14 +67,15 @@ impl Pacer {
     }
 
     pub fn time_until_credit(&self, rate: f64) -> Duration {
-        if self.has_credit() {
+        let wanted = 1.0 - self.credit;
+        if wanted <= 0.0 {
             return Duration::ZERO;
         }
-        Duration::from_secs_f64((1.0 - self.credit) / rate)
+        Duration::from_secs_f64(wanted / rate)
     }
 
     pub fn take_starvation(&mut self) -> bool {
-        std::mem::take(&mut self.starved)
+        std::mem::take(&mut self.waited)
     }
 }
 
@@ -319,16 +323,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn credit_accrues_at_the_rate() {
         let mut pacer = Pacer::new();
-        assert!(!pacer.has_credit());
+        let rate = 5_000.0;
+        assert_eq!(pacer.budget(), 0);
 
-        tokio::time::advance(Duration::from_millis(100)).await;
-        pacer.refill(50.0);
+        tokio::time::advance(Duration::from_millis(2)).await;
+        pacer.refill(rate);
 
-        assert!(pacer.has_credit());
-        for _ in 0..5 {
+        assert_eq!(pacer.budget(), 10);
+        for _ in 0..10 {
             pacer.consume();
         }
-        assert!(!pacer.has_credit());
+        assert_eq!(pacer.budget(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -340,11 +345,11 @@ mod tests {
         pacer.refill(rate);
 
         let banked = (rate * BURST_QUANTUM.as_secs_f64()) as usize;
+        assert_eq!(pacer.budget(), banked);
         for _ in 0..banked {
-            assert!(pacer.has_credit());
             pacer.consume();
         }
-        assert!(!pacer.has_credit());
+        assert_eq!(pacer.budget(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -362,7 +367,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         pacer.refill(MIN_RATE);
 
-        assert!(pacer.has_credit());
+        assert_eq!(pacer.budget(), MIN_BURST as usize);
     }
 
     #[tokio::test(start_paused = true)]
@@ -389,15 +394,25 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn starvation_is_recorded_and_cleared() {
+    async fn waiting_for_credit_is_recorded_and_cleared() {
         let mut pacer = Pacer::new();
+        assert!(!pacer.take_starvation());
 
-        pacer.refill(INITIAL_RATE);
+        pacer.waited();
         assert!(pacer.take_starvation());
         assert!(!pacer.take_starvation());
+    }
+
+    /// Credit left unspent is not a sign the allowance was generous: a pass
+    /// spends only what was queued at that moment.
+    #[tokio::test(start_paused = true)]
+    async fn unspent_credit_is_not_a_wait() {
+        let mut pacer = Pacer::new();
 
         tokio::time::advance(Duration::from_secs(1)).await;
         pacer.refill(INITIAL_RATE);
+        pacer.consume();
+
         assert!(!pacer.take_starvation());
     }
 

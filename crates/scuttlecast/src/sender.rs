@@ -198,7 +198,11 @@ impl Sender {
                     }
                 },
 
-                _ = tokio::time::sleep(until_credit), if budget == 0 => {}
+                _ = tokio::time::sleep(until_credit), if budget == 0 => {
+                    if !outbound_rx.is_empty() {
+                        pacer.waited();
+                    }
+                }
 
                 _ = tick.tick() => {
                     let starved = pacer.take_starvation();
@@ -390,8 +394,29 @@ fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u16) 
 
 #[cfg(test)]
 mod tests {
-    use super::parity_for;
+    use super::{DEFAULT_BLOCKS_PER_SLICE, DEFAULT_MAX_LIVE_SLICES, STATS_INTERVAL, parity_for};
+    use crate::BLOCK_SIZE;
     use std::num::NonZeroU16;
+
+    /// A sender may only run one window ahead of the slice a receiver last
+    /// reported, so the window and the reporting interval together cap
+    /// throughput whatever the link and the hardware can do. Widening the
+    /// interval or narrowing the window silently throttles every transfer,
+    /// which is invisible in every other test here. The defaults have to
+    /// leave a gigabit link plenty of room.
+    #[test]
+    fn the_default_window_and_report_interval_clear_a_gigabit_link() {
+        let window = DEFAULT_MAX_LIVE_SLICES.get() as f64
+            * DEFAULT_BLOCKS_PER_SLICE.get() as f64
+            * BLOCK_SIZE as f64;
+        let ceiling = window / STATS_INTERVAL.as_secs_f64();
+
+        assert!(
+            ceiling > 2e8,
+            "the defaults cap throughput at {:.0} MiB/s",
+            ceiling / (1024.0 * 1024.0)
+        );
+    }
 
     fn blocks(count: u16) -> NonZeroU16 {
         NonZeroU16::new(count).expect("nonzero")

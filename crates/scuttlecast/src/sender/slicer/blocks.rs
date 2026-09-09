@@ -1,33 +1,33 @@
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Read ahead in one go rather than a block at a time. Files and stdin are
-/// both served by the blocking thread pool, so an unbuffered block-sized read
-/// costs a task hand-off to another thread and back, which dwarfs the read.
+/// Read in one go rather than a block at a time, and carve the blocks out of
+/// what arrived. Files and stdin are both served by the blocking thread pool,
+/// so a block-sized read costs a task hand-off to another thread and back,
+/// which dwarfs the read.
 const READ_AHEAD: usize = 1 << 20;
 
+/// Blocks share the allocation they were read into. A block lives until the
+/// retransmit window lets it go, so allocating each one separately leaves the
+/// allocator coalescing thousands of block-sized holes.
 pub(crate) fn split<R: AsyncRead + Unpin>(
-    reader: R,
+    mut reader: R,
     block_size: usize,
 ) -> impl futures_core::Stream<Item = std::io::Result<Bytes>> {
-    let mut reader = BufReader::with_capacity(READ_AHEAD, reader);
-
     async_stream::stream! {
-        loop {
-            let mut buf = BytesMut::zeroed(block_size);
-            let mut filled = 0;
+        let mut slab = BytesMut::with_capacity(READ_AHEAD);
 
-            while filled < block_size {
-                match reader.read(&mut buf[filled..]).await {
+        loop {
+            while slab.len() < block_size {
+                match reader.read_buf(&mut slab).await {
                     Ok(0) => break,
-                    Ok(n) => filled += n,
+                    Ok(_) => {}
                     Err(e) => { yield Err(e); return; }
                 }
             }
 
-            if filled == 0 { break; }
-            buf.truncate(filled);
-            yield Ok(buf.freeze());
+            if slab.is_empty() { break; }
+            yield Ok(slab.split_to(block_size.min(slab.len())).freeze());
         }
     }
 }

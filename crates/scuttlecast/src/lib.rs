@@ -8,7 +8,10 @@ pub mod transport;
 
 pub const BLOCK_SIZE: usize = 1400;
 
-pub const STATS_INTERVAL: Duration = Duration::from_millis(200);
+/// How often a receiver reports. A report is also what frees the sender's
+/// retransmit window, so together with `max_live_slices` it caps throughput
+/// at one window of blocks per interval however fast the link is.
+pub const STATS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A receiver repeats a request this long after the last one
 pub const RENAK_INTERVAL: Duration = STATS_INTERVAL.saturating_mul(2);

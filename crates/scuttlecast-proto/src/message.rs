@@ -2,6 +2,7 @@ use bincode::config::standard;
 use bincode::{Decode, Encode};
 use derive_more::Display;
 
+use crate::MAX_DATAGRAM_SIZE;
 use crate::error::Error;
 use crate::payload::{Data, Done, Evicted, Hello, Nak, Parity, Stats};
 
@@ -44,8 +45,18 @@ impl Message {
         }
     }
 
+    /// Writes the message into `buf` and returns how much of it was used, so
+    /// a sender can reuse one buffer for a whole transfer rather than
+    /// allocating per datagram.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        Ok(bincode::encode_into_slice(self, buf, standard())?)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        Ok(bincode::encode_to_vec(self, standard())?)
+        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+        let len = self.encode_into(&mut buf)?;
+        buf.truncate(len);
+        Ok(buf)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {

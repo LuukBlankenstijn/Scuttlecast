@@ -91,15 +91,14 @@ impl MessageSocket {
     }
 
     pub async fn send_to(&self, message: Message, to: SocketAddr) -> Result<(), ProtoError> {
-        let bytes = message.encode()?;
-        self.socket.send_to(&bytes, to).await?;
+        let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
+        let len = message.encode_into(&mut buf)?;
+        self.socket.send_to(&buf[..len], to).await?;
         Ok(())
     }
 
     pub async fn send_to_group(&self, message: Message) -> Result<(), ProtoError> {
-        let bytes = message.encode()?;
-        self.socket.send_to(&bytes, self.group_address).await?;
-        Ok(())
+        self.send_to(message, self.group_address).await
     }
 }
 
