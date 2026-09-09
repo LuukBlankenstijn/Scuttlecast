@@ -18,8 +18,8 @@ pub const RENAK_INTERVAL: Duration = STATS_INTERVAL.saturating_mul(2);
 /// is swallowed.
 pub const HOLDOFF: Duration = Duration::from_millis(RENAK_INTERVAL.as_millis() as u64 * 3 / 4);
 
-/// No `Stats` from a participant for this long means the machine is gone
-pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// No packet of any kind for this long means the sender is gone
+/// Nothing heard from the far end for this long means the machine is gone.
+/// Both sides give up on the same rule: a receiver reports every
+/// `STATS_INTERVAL` and a sender sends far more often, so silence this long is
+/// a death rather than a slow disk.
 pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(10);

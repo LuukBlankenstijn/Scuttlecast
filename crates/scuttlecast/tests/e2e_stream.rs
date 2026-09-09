@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use proto::{Data, Done, Hello, Message};
-use scuttlecast::BLOCK_SIZE;
 use scuttlecast::error::ProtoError;
+use scuttlecast::{BLOCK_SIZE, SILENCE_TIMEOUT};
 use tokio::net::UdpSocket;
 
 async fn receive_stream(group_id: u8, port: u16) -> tokio::task::JoinHandle<Vec<u8>> {
@@ -117,4 +117,39 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
         }
         other => panic!("expected a byte count mismatch, got {other:?}"),
     }
+}
+
+/// A consumer that stops reading for longer than a peer may stay silent, which
+/// is what a disk pausing for a transaction commit looks like. The payload
+/// outruns both buffers: the receiver's channel fills, so its output is backed
+/// up, and the sender's window fills behind it, so the sender has nothing left
+/// to send. Both sides then have to keep talking through the pause. A receiver
+/// that stops reporting is evicted as a dead machine, and a sender that says
+/// nothing looks dead in turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn survives_a_consumer_that_stops_reading_past_the_silence_timeout() {
+    let sent = common::payload(1024 * BLOCK_SIZE);
+    let receiver = common::receiver(common::group(34), 48040);
+
+    let receiving = tokio::spawn(async move {
+        let mut transfer = receiver.recv_stream();
+        let mut received = Vec::new();
+
+        let first = transfer.recv().await.expect("a block before the pause");
+        received.extend_from_slice(&first);
+        tokio::time::sleep(SILENCE_TIMEOUT + Duration::from_secs(3)).await;
+
+        while let Some(block) = transfer.recv().await {
+            received.extend_from_slice(&block);
+        }
+        transfer.finish().await.expect("finish");
+        received
+    });
+
+    common::sender_windowed(common::group(34), 48040, 1, 9)
+        .send_stream(common::source(&sent))
+        .await
+        .expect("send");
+
+    assert_eq!(receiving.await.expect("join"), sent);
 }

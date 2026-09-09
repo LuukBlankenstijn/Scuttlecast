@@ -15,7 +15,7 @@ use tokio::{
 use tracing::{debug, warn};
 
 use crate::{
-    LIVENESS_TIMEOUT, STATS_INTERVAL,
+    SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
     sender::pacer::{Pacer, REPAIR_THRESHOLD, RateController, TICK_INTERVAL},
@@ -197,9 +197,9 @@ impl Sender {
                     let starved = pacer.take_starvation();
                     rate_controller.tick(starved);
                     let now = std::time::Instant::now();
-                    for (target, stuck_at) in group.reap_silent(now, LIVENESS_TIMEOUT) {
+                    for (target, stuck_at) in group.reap_silent(now, SILENCE_TIMEOUT) {
                         let reason = format!(
-                            "silent for {LIVENESS_TIMEOUT:?} while stuck at slice {stuck_at}"
+                            "silent for {SILENCE_TIMEOUT:?} while stuck at slice {stuck_at}"
                         );
                         warn!(target, stuck_at, "evicting silent participant");
                         self.socket.send_to_group(Message::Evicted(Evicted {
@@ -218,6 +218,9 @@ impl Sender {
 
                     let sent_this_tick = blocks_sent - blocks_at_last_tick;
                     blocks_at_last_tick = blocks_sent;
+                    if sent_this_tick == 0 && !draining {
+                        self.socket.send_to_group(self.hello(transfer_id)).await?;
+                    }
                     let limiting = self
                         .bottleneck(
                             &group,
@@ -308,6 +311,15 @@ impl Sender {
         }
     }
 
+    fn hello(&self, transfer_id: u64) -> Message {
+        Message::Hello(Hello {
+            transfer_id,
+            blocks_per_slice: self.blocks_per_slice,
+            parity_per_slice: self.parity_per_slice,
+            max_live_slices: self.max_live_slices,
+        })
+    }
+
     async fn gather_participants(&self, transfer_id: u64) -> Result<Group, ProtoError> {
         let mut group = Group::default();
         let start = Instant::now();
@@ -316,16 +328,7 @@ impl Sender {
 
         loop {
             tokio::select! {
-                _ = hello_tick.tick() => {
-                    self.socket
-                        .send_to_group(Message::Hello(Hello {
-                            transfer_id,
-                            blocks_per_slice: self.blocks_per_slice,
-                            parity_per_slice: self.parity_per_slice,
-                            max_live_slices: self.max_live_slices,
-                        }))
-                        .await?
-                }
+                _ = hello_tick.tick() => self.socket.send_to_group(self.hello(transfer_id)).await?,
 
                 r = self.socket.recv_in_transfer(transfer_id) => {
                     let (message, socket) = r?;

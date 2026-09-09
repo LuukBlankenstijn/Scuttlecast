@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU16,
     path::PathBuf,
@@ -9,7 +10,7 @@ use bon::Builder;
 use bytes::Bytes;
 use proto::{Data, Done, Hello, Message, Nak, Parity, Stats};
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
@@ -121,8 +122,8 @@ impl Receiver {
                 receiver_id, "joined session"
             );
 
-            Session::new(socket, sender, receiver_id, &hello, blocks_tx)
-                .run()
+            Session::new(socket, sender, receiver_id, &hello)
+                .run(blocks_tx)
                 .await
         });
 
@@ -174,7 +175,7 @@ struct Session {
     blocks_per_slice: NonZeroU16,
     assembler: Assembler,
     naks: Naks,
-    blocks: mpsc::Sender<Bytes>,
+    pending: VecDeque<Bytes>,
     emit_floor: u32,
     received: u64,
     highest_seq: Option<u64>,
@@ -184,17 +185,12 @@ struct Session {
     written_bytes: u64,
     blocks_written: u64,
     sink_stall: Duration,
+    last_handover: Instant,
     last_packet: Instant,
 }
 
 impl Session {
-    fn new(
-        socket: MessageSocket,
-        sender: SocketAddr,
-        receiver_id: u64,
-        hello: &Hello,
-        blocks: mpsc::Sender<Bytes>,
-    ) -> Self {
+    fn new(socket: MessageSocket, sender: SocketAddr, receiver_id: u64, hello: &Hello) -> Self {
         Self {
             socket,
             sender,
@@ -207,7 +203,7 @@ impl Session {
                 hello.max_live_slices,
             ),
             naks: Naks::default(),
-            blocks,
+            pending: VecDeque::new(),
             emit_floor: 0,
             received: 0,
             highest_seq: None,
@@ -217,15 +213,16 @@ impl Session {
             written_bytes: 0,
             blocks_written: 0,
             sink_stall: Duration::ZERO,
+            last_handover: Instant::now(),
             last_packet: Instant::now(),
         }
     }
 
-    async fn run(mut self) -> Result<TransferSummary, ProtoError> {
+    async fn run(mut self, sink: mpsc::Sender<Bytes>) -> Result<TransferSummary, ProtoError> {
         let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
         let mut renak_tick = tokio::time::interval(RENAK_INTERVAL);
 
-        while !self.assembler.is_finished() {
+        while !self.assembler.is_finished() || !self.pending.is_empty() {
             let silence = SILENCE_TIMEOUT.saturating_sub(self.last_packet.elapsed());
 
             tokio::select! {
@@ -235,12 +232,18 @@ impl Session {
                     self.on_message(message).await?;
                 }
 
+                _ = sink.reserve(), if !self.pending.is_empty() => {}
+
                 _ = stats_tick.tick() => self.send_stats().await?,
 
                 _ = renak_tick.tick() => self.request_gaps().await?,
 
-                _ = tokio::time::sleep(silence) => return Err(self.went_silent()),
+                _ = tokio::time::sleep(silence), if !self.assembler.is_finished() => {
+                    return Err(self.went_silent());
+                }
             }
+
+            self.hand_over(&sink)?;
         }
 
         self.check_byte_total()?;
@@ -300,8 +303,6 @@ impl Session {
             self.refused(data.slice_no);
         }
 
-        self.write_ready().await?;
-
         if floor_advanced {
             self.request_gaps().await?;
         }
@@ -323,8 +324,6 @@ impl Session {
             self.refused(parity.slice_no);
         }
 
-        self.write_ready().await?;
-
         if floor_advanced {
             self.request_gaps().await?;
         }
@@ -345,25 +344,41 @@ impl Session {
         self.total_bytes = Some(done.total_bytes);
         self.assembler.on_done(done.total_blocks);
 
-        self.write_ready().await?;
         self.request_gaps().await
     }
 
-    async fn write_ready(&mut self) -> Result<(), ProtoError> {
-        for block in self.assembler.take_ready() {
-            let block = self.within_total(block);
-            if block.is_empty() {
-                continue;
-            }
-
-            let handed_over = Instant::now();
-            self.blocks
-                .send(block)
-                .await
-                .map_err(|_| ProtoError::SinkClosed)?;
-            self.sink_stall += handed_over.elapsed();
-            self.blocks_written += 1;
+    /// Hands over what the sink will take without ever waiting for it. A
+    /// receiver whose disk pauses has to keep reading its socket and keep
+    /// reporting, or the sender hears silence and evicts a machine that is
+    /// merely slow. Blocks the sink would not take stay here, and the
+    /// assembler holds the rest, so the sender's window is what slows down.
+    fn hand_over(&mut self, sink: &mpsc::Sender<Bytes>) -> Result<(), ProtoError> {
+        let now = Instant::now();
+        if !self.pending.is_empty() {
+            self.sink_stall += now - self.last_handover;
         }
+        self.last_handover = now;
+
+        if self.pending.is_empty() {
+            for block in self.assembler.take_ready() {
+                let block = self.within_total(block);
+                if !block.is_empty() {
+                    self.pending.push_back(block);
+                }
+            }
+        }
+
+        while let Some(block) = self.pending.pop_front() {
+            match sink.try_send(block) {
+                Ok(()) => self.blocks_written += 1,
+                Err(TrySendError::Full(block)) => {
+                    self.pending.push_front(block);
+                    break;
+                }
+                Err(TrySendError::Closed(_)) => return Err(ProtoError::SinkClosed),
+            }
+        }
+
         self.naks.forget_below(self.assembler.next_needed());
 
         Ok(())
