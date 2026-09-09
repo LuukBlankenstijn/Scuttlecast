@@ -2,7 +2,9 @@ use std::{collections::HashMap, time::Duration};
 
 use tokio::time::Instant;
 
-pub const LOSS_THRESHOLD: f64 = 0.005;
+/// Loss a healthy network does not reach, and that parity covers when it
+/// happens anyway. Below this the rate grows; above it the rate backs off.
+pub const LOSS_THRESHOLD: f64 = 0.02;
 const K: f64 = 4.0;
 const MIN_FACTOR: f64 = 0.5;
 const GOOD_TICKS_NEEDED: u32 = 3;
