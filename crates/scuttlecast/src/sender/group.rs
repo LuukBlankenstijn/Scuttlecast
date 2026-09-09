@@ -1,32 +1,52 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::{HOLDOFF, state::ReceiverState};
 use proto::{Nak, Stats};
 
-use crate::HOLDOFF;
-
-#[derive(Default)]
 struct Participant {
+    address: SocketAddr,
     next_needed: u32,
     reached_end: bool,
     last_seen: Option<Instant>,
     last_report: Option<(u64, u64)>,
+    windowed_loss: f64,
     cumulative_loss: f64,
+    naks: u64,
+    sink_stall_ms: u32,
+}
+
+impl Participant {
+    fn new(address: SocketAddr) -> Self {
+        Self {
+            address,
+            next_needed: 0,
+            reached_end: false,
+            last_seen: None,
+            last_report: None,
+            windowed_loss: 0.0,
+            cumulative_loss: 0.0,
+            naks: 0,
+            sink_stall_ms: 0,
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct Group {
     participants: HashMap<u64, Participant>,
     needed_from: u32,
+    emitted: u32,
     total_slices: Option<u32>,
     suppressed: HashMap<(u32, u16), Instant>,
 }
 
 impl Group {
     /// Returns true if the receiver was not already a participant
-    pub fn join(&mut self, receiver_id: u64) -> bool {
+    pub fn join(&mut self, receiver_id: u64, address: SocketAddr) -> bool {
         self.participants
-            .insert(receiver_id, Participant::default())
+            .insert(receiver_id, Participant::new(address))
             .is_none()
     }
 
@@ -94,6 +114,7 @@ impl Group {
     pub fn report_delta(&mut self, stats: &Stats) -> Option<(u64, u64)> {
         let participant = self.participants.get_mut(&stats.receiver_id)?;
         let current = (stats.total_received, stats.total_expected);
+        participant.sink_stall_ms = stats.sink_stall_ms;
         if current.1 > 0 {
             participant.cumulative_loss = 1.0 - current.0 as f64 / current.1 as f64;
         }
@@ -104,14 +125,43 @@ impl Group {
         if participant.last_report.is_none() || delta.is_some() {
             participant.last_report = Some(current);
         }
+        if let Some((seen, expected)) = delta {
+            participant.windowed_loss = 1.0 - seen as f64 / expected as f64;
+        }
         delta
     }
 
-    #[allow(dead_code)]
-    pub fn loss_ratio(&self, receiver_id: u64) -> Option<f64> {
+    /// A snapshot of every participant for reporting, slowest last
+    pub fn rows(&self) -> Vec<ReceiverState> {
+        let mut rows: Vec<_> = self
+            .participants
+            .iter()
+            .map(|(receiver_id, participant)| ReceiverState {
+                receiver_id: *receiver_id,
+                address: participant.address,
+                windowed_loss: participant.windowed_loss,
+                lifetime_loss: participant.cumulative_loss,
+                next_needed_slice: participant.next_needed,
+                slices_behind: self.slices_behind(participant),
+                naks: participant.naks,
+                sink_stall_ms: participant.sink_stall_ms,
+            })
+            .collect();
+
+        rows.sort_by_key(|row| row.slices_behind);
+        rows
+    }
+
+    /// The participant the retransmit window is waiting on
+    pub fn slowest_participant(&self) -> Option<(u64, u32)> {
         self.participants
-            .get(&receiver_id)
-            .map(|participant| participant.cumulative_loss)
+            .iter()
+            .min_by_key(|(_, participant)| participant.next_needed)
+            .map(|(receiver_id, participant)| (*receiver_id, self.slices_behind(participant)))
+    }
+
+    fn slices_behind(&self, participant: &Participant) -> u32 {
+        self.emitted.saturating_sub(participant.next_needed)
     }
 
     /// Records how many slices the transfer turned out to have. Progress
@@ -138,19 +188,26 @@ impl Group {
         self.advance()
     }
 
-    /// Returns the blocks that are worth putting back on the wire
+    /// Returns the shards that are worth putting back on the wire
     pub fn on_nak(&mut self, nak: &Nak, now: Instant) -> Vec<u16> {
         if !self.contains(nak.receiver_id) || self.nobody_needs(nak.slice_no) {
             return Vec::new();
         }
+        if let Some(participant) = self.participants.get_mut(&nak.receiver_id) {
+            participant.naks += 1;
+        }
 
         let mut wanted = Vec::new();
-        for &block in &nak.missing {
-            if self.suppress((nak.slice_no, block), now) {
-                wanted.push(block);
+        for &shard in &nak.missing {
+            if self.suppress((nak.slice_no, shard), now) {
+                wanted.push(shard);
             }
         }
         wanted
+    }
+
+    pub fn on_emitted(&mut self, slices: u32) {
+        self.emitted = self.emitted.max(slices);
     }
 
     fn advance(&mut self) -> Option<u32> {
@@ -195,12 +252,17 @@ impl Group {
 mod tests {
     use super::{Group, HOLDOFF};
     use proto::{Nak, Stats};
+    use std::net::SocketAddr;
     use std::time::{Duration, Instant};
+
+    fn address(receiver_id: u64) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 9000 + receiver_id as u16))
+    }
 
     fn group(receiver_ids: &[u64]) -> Group {
         let mut group = Group::default();
         for &receiver_id in receiver_ids {
-            group.join(receiver_id);
+            group.join(receiver_id, address(receiver_id));
         }
         group
     }
@@ -240,8 +302,8 @@ mod tests {
     fn joining_twice_is_not_a_new_participant() {
         let mut group = Group::default();
 
-        assert!(group.join(7));
-        assert!(!group.join(7));
+        assert!(group.join(7, address(7)));
+        assert!(!group.join(7, address(7)));
         assert_eq!(group.len(), 1);
     }
 
@@ -432,11 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn the_cumulative_loss_ratio_reflects_the_latest_report() {
+    fn the_reported_rows_carry_both_loss_measures() {
         let mut group = group(&[7]);
         group.report_delta(&report(7, 150, 200));
+        group.report_delta(&report(7, 200, 300));
 
-        assert_eq!(group.loss_ratio(7), Some(0.25));
+        let row = &group.rows()[0];
+
+        assert_eq!(row.lifetime_loss, 1.0 - 200.0 / 300.0);
+        assert_eq!(row.windowed_loss, 0.5);
     }
 
     #[test]

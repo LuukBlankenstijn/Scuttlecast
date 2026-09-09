@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use tokio::time::Instant;
 
-const LOSS_THRESHOLD: f64 = 0.005;
+pub const LOSS_THRESHOLD: f64 = 0.005;
 const K: f64 = 4.0;
 const MIN_FACTOR: f64 = 0.5;
 const GOOD_TICKS_NEEDED: u32 = 3;
@@ -75,6 +75,7 @@ struct ClientLoss {
 pub struct RateController {
     clients: HashMap<u64, ClientLoss>,
     rate: f64,
+    ceiling: Option<f64>,
     good_ticks: u32,
     slow_start_limit: Option<f64>,
 }
@@ -84,9 +85,30 @@ impl RateController {
         Self {
             clients: HashMap::new(),
             rate: INITIAL_RATE,
+            ceiling: None,
             good_ticks: 0,
             slow_start_limit: None,
         }
+    }
+
+    pub fn capped_at(mut self, ceiling: Option<f64>) -> Self {
+        self.ceiling = ceiling;
+        self
+    }
+
+    pub fn at_ceiling(&self) -> bool {
+        self.ceiling.is_some_and(|ceiling| self.rate >= ceiling)
+    }
+
+    /// The receiver losing the most right now, which is the one the rate
+    /// follows
+    pub fn worst(&self) -> Option<(u64, f64)> {
+        let now = Instant::now();
+        self.clients
+            .iter()
+            .filter(|(_, client)| now.duration_since(client.last_report_at) < STALENESS_LIMIT)
+            .max_by(|(_, left), (_, right)| left.ewma.total_cmp(&right.ewma))
+            .map(|(id, client)| (*id, client.ewma))
     }
 
     pub fn on_report(&mut self, id: u64, blocks_seen: u64, blocks_expected: u64) {
@@ -123,7 +145,10 @@ impl RateController {
 
         self.good_ticks += 1;
         if self.in_slow_start() || self.good_ticks >= GOOD_TICKS_NEEDED {
-            self.rate = self.grown_rate();
+            self.rate = match self.ceiling {
+                Some(ceiling) => self.grown_rate().min(ceiling),
+                None => self.grown_rate(),
+            };
         }
     }
 

@@ -7,16 +7,21 @@ use std::{
 
 use bon::Builder;
 use proto::{Data, Done, Evicted, Hello, Message};
-use tokio::{io::AsyncRead, sync::mpsc, time::Instant};
+use tokio::{
+    io::AsyncRead,
+    sync::{mpsc, watch},
+    time::Instant,
+};
 use tracing::{debug, warn};
 
 use crate::{
     LIVENESS_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
-    sender::pacer::{Pacer, RateController, TICK_INTERVAL},
+    sender::pacer::{LOSS_THRESHOLD, Pacer, RateController, TICK_INTERVAL},
     sender::slicer::Slicer,
     sender::slicer::channel::{Feedback, Outbound},
+    state::{Bottleneck, TransferState},
     transport::{Losing, MessageSocket},
 };
 
@@ -25,7 +30,7 @@ mod pacer;
 mod slicer;
 
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
-const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(8).expect("nonzero");
+const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
 
 #[derive(Builder)]
 pub struct Sender {
@@ -40,6 +45,10 @@ pub struct Sender {
     blocks_per_slice: NonZeroU16,
     #[builder(default = DEFAULT_MAX_LIVE_SLICES)]
     max_live_slices: NonZeroU16,
+    /// Blocks per second the sender will not exceed even when nothing is lost
+    max_rate: Option<f64>,
+    #[builder(default = watch::channel(TransferState::default()).0)]
+    progress: watch::Sender<TransferState>,
 }
 
 impl Sender {
@@ -48,6 +57,11 @@ impl Sender {
     pub fn losing(mut self, losing: Losing) -> Self {
         self.socket = self.socket.losing(losing);
         self
+    }
+
+    /// Follows what the transfer is doing and why it is not going faster
+    pub fn progress(&self) -> watch::Receiver<TransferState> {
+        self.progress.subscribe()
     }
 
     pub async fn send_file(&self, path: PathBuf) -> Result<(), ProtoError> {
@@ -84,9 +98,12 @@ impl Sender {
         let mut total_blocks = 0u64;
         let mut draining = false;
         let mut drain_deadline: Option<Instant> = None;
-        let mut rate_controller = RateController::new();
+        let mut rate_controller = RateController::new().capped_at(self.max_rate);
         let mut pacer = Pacer::new();
         let mut tick = tokio::time::interval(TICK_INTERVAL);
+        let mut blocks_sent = 0u64;
+        let mut slices_emitted = 0u32;
+        let mut source_wait = Duration::ZERO;
 
         let result = loop {
             if group.len() == 0 {
@@ -103,9 +120,11 @@ impl Sender {
             let drain_left =
                 drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
+            let waited_since = Instant::now();
             tokio::select! {
                 outbound = outbound_rx.recv(), if has_credit => match outbound {
                     Some(Outbound::Block { slice_no, block_in_slice, emit_floor, payload }) => {
+                        source_wait += waited_since.elapsed();
                         pacer.consume();
                         self.socket.send_to_group(Message::Data(Data {
                             transfer_id,
@@ -116,6 +135,9 @@ impl Sender {
                             payload: payload.into(),
                         })).await?;
                         seq += 1;
+                        blocks_sent += 1;
+                        slices_emitted = slices_emitted.max(emit_floor);
+                        group.on_emitted(emit_floor);
                     }
                     Some(Outbound::Eof { total_bytes: bytes, total_blocks: blocks }) => {
                         total_bytes = bytes;
@@ -157,6 +179,25 @@ impl Sender {
                             total_blocks,
                         })).await?;
                     }
+
+                    let limiting = self
+                        .bottleneck(
+                            &group,
+                            &rate_controller,
+                            std::mem::take(&mut source_wait),
+                            draining,
+                        )
+                        .attribute();
+                    self.progress.send_replace(TransferState {
+                        transfer_id,
+                        blocks_per_second: rate_controller.rate(),
+                        blocks_sent,
+                        slices_emitted,
+                        total_blocks: draining.then_some(total_blocks),
+                        draining,
+                        limiting,
+                        receivers: group.rows(),
+                    });
                 }
 
                 _ = tokio::time::sleep(drain_left.unwrap_or_default()), if drain_left.is_some() => {
@@ -204,6 +245,24 @@ impl Sender {
         result
     }
 
+    fn bottleneck(
+        &self,
+        group: &Group,
+        rate_controller: &RateController,
+        source_wait: Duration,
+        draining: bool,
+    ) -> Bottleneck {
+        Bottleneck {
+            slowest: group.slowest_participant(),
+            worst_loss: rate_controller.worst(),
+            loss_threshold: LOSS_THRESHOLD,
+            max_live_slices: self.max_live_slices.get() as u32,
+            at_ceiling: rate_controller.at_ceiling(),
+            source_wait: source_wait.max(TICK_INTERVAL / 2) - TICK_INTERVAL / 2,
+            draining,
+        }
+    }
+
     async fn gather_participants(&self, transfer_id: u64) -> Result<Group, ProtoError> {
         let mut group = Group::default();
         let start = Instant::now();
@@ -225,7 +284,7 @@ impl Sender {
 
                 r = self.socket.recv_in_transfer(transfer_id) => {
                     let (message, socket) = r?;
-                    if let Message::Join { receiver_id, .. } = message && group.join(receiver_id) {
+                    if let Message::Join { receiver_id, .. } = message && group.join(receiver_id, socket) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver joined");
                     }
                     if let Message::Leave { receiver_id, .. } = message && group.leave(receiver_id) {

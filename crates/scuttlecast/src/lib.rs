@@ -3,6 +3,7 @@ use std::time::Duration;
 pub mod error;
 pub mod receiver;
 pub mod sender;
+pub mod state;
 pub mod transport;
 
 pub const BLOCK_SIZE: usize = 1400;

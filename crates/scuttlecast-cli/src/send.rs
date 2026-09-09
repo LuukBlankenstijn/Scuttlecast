@@ -2,6 +2,9 @@ use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 
 use clap::Parser;
 use scuttlecast::error::ProtoError;
+use scuttlecast::state::TransferState;
+use tokio::sync::watch;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -28,6 +31,10 @@ pub struct Args {
     /// Time in seconds the sender waits for clients to join
     #[arg(short, long, default_value = "300", value_parser = parse_seconds)]
     wait: Duration,
+
+    /// Blocks per second the sender will not exceed, even with no loss
+    #[arg(long)]
+    max_rate: Option<f64>,
 }
 
 fn parse_seconds(s: &str) -> Result<Duration, String> {
@@ -40,10 +47,45 @@ pub async fn send(args: Args) -> Result<(), ProtoError> {
     let sender = scuttlecast::sender::Sender::builder()
         .socket(args.local_ip, args.group_ip, args.port)?
         .maybe_min_receivers(args.min_receivers)
+        .maybe_max_rate(args.max_rate)
         .max_wait(args.wait)
         .build();
-    match args.file {
+
+    let reporting = tokio::spawn(report(sender.progress()));
+
+    let outcome = match args.file {
         Some(filepath) => sender.send_file(filepath).await,
         None => sender.send_stream(tokio::io::stdin()).await,
+    };
+
+    reporting.abort();
+    outcome
+}
+
+async fn report(mut progress: watch::Receiver<TransferState>) {
+    while progress.changed().await.is_ok() {
+        let state = progress.borrow_and_update().clone();
+
+        info!(
+            rate = format!("{:.1} MiB/s", state.bytes_per_second() / (1024.0 * 1024.0)),
+            blocks = state.blocks_sent,
+            slices = state.slices_emitted,
+            draining = state.draining,
+            limited_by = %state.limiting,
+            "sending"
+        );
+
+        for receiver in &state.receivers {
+            debug!(
+                receiver_id = receiver.receiver_id,
+                address = %receiver.address,
+                behind = receiver.slices_behind,
+                loss = format!("{:.2}%", receiver.windowed_loss * 100.0),
+                lifetime_loss = format!("{:.2}%", receiver.lifetime_loss * 100.0),
+                naks = receiver.naks,
+                sink_stall_ms = receiver.sink_stall_ms,
+                "receiver"
+            );
+        }
     }
 }
