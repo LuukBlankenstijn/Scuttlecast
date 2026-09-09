@@ -41,17 +41,18 @@ impl Slice {
             .all(|slot| slot.is_some())
     }
 
-    /// The lowest missing slots worth asking for: only as many as are still
-    /// needed to reach `target` recoverable shards, and never the padding slots
-    /// beyond the short final slice.
-    fn wanted(&self, target: u16, blocks_per_slice: u16) -> Vec<u16> {
+    /// The lowest missing data blocks worth asking for: only as many as are
+    /// still needed to reach `target` recoverable shards, and never the
+    /// padding slots beyond a short final slice. Parity is never worth asking
+    /// for, since every shard still missing below `target` is a data block and
+    /// there are always at least as many of those as the shortfall.
+    fn wanted(&self, target: u16) -> Vec<u16> {
         let shortfall = (target as usize).saturating_sub(self.received as usize);
         self.slots
             .iter()
             .enumerate()
-            .filter(|(slot, held)| {
-                held.is_none() && (*slot < target as usize || *slot >= blocks_per_slice as usize)
-            })
+            .take(target as usize)
+            .filter(|(_, held)| held.is_none())
             .map(|(slot, _)| slot as u16)
             .take(shortfall)
             .collect()
@@ -165,7 +166,7 @@ impl Assembler {
             .map(|slice_no| {
                 let target = self.target(slice_no);
                 let missing = match self.slices.get(&slice_no) {
-                    Some(slice) => slice.wanted(target, self.blocks_per_slice),
+                    Some(slice) => slice.wanted(target),
                     None => (0..target).collect(),
                 };
                 (slice_no, missing)
