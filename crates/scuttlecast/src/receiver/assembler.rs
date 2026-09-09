@@ -122,13 +122,29 @@ impl Assembler {
             .insert(slot, payload)
     }
 
+    /// A slice that had to be reconstructed may only be written once its true
+    /// size is settled. Every slice but the last holds `blocks_per_slice`
+    /// blocks; the last holds fewer, and which slice is last is only known
+    /// from `Done` or from a slice above it. With enough parity a short final
+    /// slice reaches the shard count of a full one, and reconstructing it then
+    /// would invent a block the transfer never had. A slice holding all of its
+    /// data blocks is never in doubt.
+    fn can_write(&self, slice_no: u32) -> bool {
+        self.total_blocks.is_some()
+            || self.slices.keys().any(|seen| *seen > slice_no)
+            || self
+                .slices
+                .get(&slice_no)
+                .is_some_and(|slice| slice.data_present(self.blocks_per_slice))
+    }
+
     /// Hands over every block that can now be written, in order, and advances
     /// past the slices it emptied, reconstructing the missing data of any slice
     /// that carries enough parity.
     pub(super) fn take_ready(&mut self) -> Vec<Bytes> {
         let mut ready = Vec::new();
 
-        while self.is_complete(self.next_needed) {
+        while self.can_write(self.next_needed) && self.is_complete(self.next_needed) {
             let Some(slice) = self.slices.remove(&self.next_needed) else {
                 break;
             };
@@ -457,10 +473,10 @@ mod tests {
         let parity = parity_for(3, 2, &data);
 
         let mut assembler = fec_assembler(3, 2, 8);
+        assembler.on_done(3);
         assembler.insert(0, 0, Bytes::from(data[0].clone()));
         assembler.insert(0, 2, Bytes::from(data[2].clone()));
         assembler.insert(0, 3, Bytes::from(parity[0].clone()));
-
         let ready = assembler.take_ready();
 
         assert_eq!(
@@ -532,5 +548,52 @@ mod tests {
 
         assembler.insert(0, 0, block(0));
         assert_eq!(assembler.take_ready(), vec![block(0), block(1)]);
+    }
+
+    #[test]
+    fn a_reconstructable_slice_waits_until_its_size_is_settled() {
+        let data: Vec<Vec<u8>> = (0..3).map(shard).collect();
+        let parity = parity_for(3, 2, &data);
+        let mut assembler = fec_assembler(3, 2, 8);
+
+        assembler.insert(0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 2, Bytes::from(data[2].clone()));
+        assembler.insert(0, 3, Bytes::from(parity[0].clone()));
+
+        assert!(assembler.take_ready().is_empty());
+
+        assembler.on_done(3);
+
+        assert_eq!(assembler.take_ready().len(), 3);
+    }
+
+    #[test]
+    fn a_slice_with_a_successor_is_written_without_waiting_for_done() {
+        let mut assembler = fec_assembler(4, 2, 8);
+        for slot in 0..4 {
+            assembler.insert(0, slot, block(slot as u8));
+        }
+        assembler.insert(1, 0, block(9));
+
+        assert_eq!(assembler.take_ready().len(), 4);
+    }
+
+    #[test]
+    fn parity_cannot_conjure_a_block_the_final_slice_never_held() {
+        let data: Vec<Vec<u8>> = (0..3).map(shard).collect();
+        let parity = parity_for(3, 2, &data);
+        let mut assembler = fec_assembler(3, 2, 8);
+
+        assembler.insert(0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 1, Bytes::from(data[1].clone()));
+        assembler.insert(0, 3, Bytes::from(parity[0].clone()));
+        assert!(assembler.take_ready().is_empty());
+
+        assembler.on_done(2);
+
+        assert_eq!(
+            assembler.take_ready(),
+            vec![Bytes::from(data[0].clone()), Bytes::from(data[1].clone())]
+        );
     }
 }

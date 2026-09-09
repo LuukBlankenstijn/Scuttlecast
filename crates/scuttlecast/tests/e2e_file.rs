@@ -57,3 +57,14 @@ async fn transfers_spanning_multiple_slices() {
     let received = common::transfer_to_file(8, 46070, &sent).await;
     assert_eq!(received, sent);
 }
+
+/// A final slice holding at least `blocks_per_slice - parity_per_slice` blocks
+/// can reach the shard count of a full slice, so the receiver could once
+/// reconstruct a block the transfer never had and write it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transfers_a_final_slice_parity_alone_could_fill() {
+    let sent = common::payload(62 * BLOCK_SIZE + 500);
+    let received = common::transfer_to_file(9, 46080, &sent).await;
+    assert_eq!(received.len(), sent.len());
+    assert_eq!(received, sent);
+}
