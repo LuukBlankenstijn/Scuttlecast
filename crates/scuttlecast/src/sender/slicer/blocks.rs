@@ -1,10 +1,17 @@
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
+
+/// Read ahead in one go rather than a block at a time. Files and stdin are
+/// both served by the blocking thread pool, so an unbuffered block-sized read
+/// costs a task hand-off to another thread and back, which dwarfs the read.
+const READ_AHEAD: usize = 1 << 20;
 
 pub(crate) fn split<R: AsyncRead + Unpin>(
-    mut reader: R,
+    reader: R,
     block_size: usize,
 ) -> impl futures_core::Stream<Item = std::io::Result<Bytes>> {
+    let mut reader = BufReader::with_capacity(READ_AHEAD, reader);
+
     async_stream::stream! {
         loop {
             let mut buf = BytesMut::zeroed(block_size);

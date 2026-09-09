@@ -53,6 +53,12 @@ impl Pacer {
         self.credit >= 1.0
     }
 
+    /// Whole blocks the pacer will allow right now, so a sender can take a
+    /// batch in one go rather than asking once per block
+    pub fn budget(&self) -> usize {
+        self.credit.max(0.0) as usize
+    }
+
     pub fn consume(&mut self) {
         self.credit -= 1.0;
     }

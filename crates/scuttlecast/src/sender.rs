@@ -33,6 +33,11 @@ const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero
 const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
 const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
+/// Blocks taken from the slicer per pass through the send loop. Each pass
+/// arms and drops a handful of timers, which at one block per pass cost more
+/// than sending the block did.
+const SEND_BATCH: usize = 256;
+
 #[derive(Builder)]
 pub struct Sender {
     #[builder(with = |local_ip: Ipv4Addr, group_ip: Ipv4Addr, port: u16,| -> Result<_, ProtoError> {
@@ -112,6 +117,7 @@ impl Sender {
         let mut blocks_at_last_tick = 0u64;
         let mut slices_emitted = 0u32;
         let mut source_wait = Duration::ZERO;
+        let mut batch = Vec::with_capacity(SEND_BATCH);
 
         let result = loop {
             if group.len() == 0 {
@@ -123,63 +129,69 @@ impl Sender {
 
             let rate = rate_controller.rate();
             pacer.refill(rate);
-            let has_credit = pacer.has_credit();
+            let budget = pacer.budget().min(SEND_BATCH);
             let until_credit = pacer.time_until_credit(rate);
             let drain_left =
                 drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
             let waited_since = Instant::now();
             tokio::select! {
-                outbound = outbound_rx.recv(), if has_credit => match outbound {
-                    Some(Outbound::Block { slice_no, block_in_slice, emit_floor, payload }) => {
-                        source_wait += waited_since.elapsed();
-                        pacer.consume();
-                        self.socket.send_to_group(Message::Data(Data {
-                            transfer_id,
-                            seq,
-                            slice_no,
-                            block_in_slice,
-                            emit_floor,
-                            payload: payload.into(),
-                        })).await?;
-                        seq += 1;
-                        blocks_sent += 1;
-                        slices_emitted = slices_emitted.max(emit_floor);
-                        group.on_emitted(emit_floor);
+                taken = outbound_rx.recv_many(&mut batch, budget), if budget > 0 => {
+                    if taken == 0 {
+                        break Err(ProtoError::EgressClosed);
                     }
-                    Some(Outbound::Parity { slice_no, parity_index, emit_floor, payload }) => {
-                        source_wait += waited_since.elapsed();
-                        pacer.consume();
-                        self.socket.send_to_group(Message::Parity(Parity {
-                            transfer_id,
-                            seq,
-                            slice_no,
-                            parity_index,
-                            emit_floor,
-                            payload: payload.into(),
-                        })).await?;
-                        seq += 1;
-                        slices_emitted = slices_emitted.max(emit_floor);
-                        group.on_emitted(emit_floor);
+                    source_wait += waited_since.elapsed();
+
+                    for outbound in batch.drain(..) {
+                        match outbound {
+                            Outbound::Block { slice_no, block_in_slice, emit_floor, payload } => {
+                                pacer.consume();
+                                self.socket.send_to_group(Message::Data(Data {
+                                    transfer_id,
+                                    seq,
+                                    slice_no,
+                                    block_in_slice,
+                                    emit_floor,
+                                    payload: payload.into(),
+                                })).await?;
+                                seq += 1;
+                                blocks_sent += 1;
+                                slices_emitted = slices_emitted.max(emit_floor);
+                                group.on_emitted(emit_floor);
+                            }
+                            Outbound::Parity { slice_no, parity_index, emit_floor, payload } => {
+                                pacer.consume();
+                                self.socket.send_to_group(Message::Parity(Parity {
+                                    transfer_id,
+                                    seq,
+                                    slice_no,
+                                    parity_index,
+                                    emit_floor,
+                                    payload: payload.into(),
+                                })).await?;
+                                seq += 1;
+                                slices_emitted = slices_emitted.max(emit_floor);
+                                group.on_emitted(emit_floor);
+                            }
+                            Outbound::Eof { total_bytes: bytes, total_blocks: blocks } => {
+                                total_bytes = bytes;
+                                total_blocks = blocks;
+                                let total_slices =
+                                    blocks.div_ceil(self.blocks_per_slice.get() as u64) as u32;
+                                group.on_eof(total_slices);
+                                draining = true;
+                                drain_deadline = Some(Instant::now() + self.max_wait);
+                                self.socket.send_to_group(Message::Done(Done {
+                                    transfer_id,
+                                    total_bytes,
+                                    total_blocks,
+                                })).await?;
+                            }
+                        }
                     }
-                    Some(Outbound::Eof { total_bytes: bytes, total_blocks: blocks }) => {
-                        total_bytes = bytes;
-                        total_blocks = blocks;
-                        let total_slices =
-                            blocks.div_ceil(self.blocks_per_slice.get() as u64) as u32;
-                        group.on_eof(total_slices);
-                        draining = true;
-                        drain_deadline = Some(Instant::now() + self.max_wait);
-                        self.socket.send_to_group(Message::Done(Done {
-                            transfer_id,
-                            total_bytes,
-                            total_blocks,
-                        })).await?;
-                    }
-                    None => break Err(ProtoError::EgressClosed),
                 },
 
-                _ = tokio::time::sleep(until_credit), if !has_credit => {}
+                _ = tokio::time::sleep(until_credit), if budget == 0 => {}
 
                 _ = tick.tick() => {
                     let starved = pacer.take_starvation();

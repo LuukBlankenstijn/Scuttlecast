@@ -7,6 +7,12 @@ use tokio::net::UdpSocket;
 
 use crate::error::ProtoError;
 
+/// Asked for on both sockets. The default of a couple of hundred kilobytes is
+/// a few milliseconds of buffering at LAN speed, so a receiver pausing to
+/// write to disk drops datagrams that were never lost in transit. The kernel
+/// clamps this to `net.core.rmem_max` and `net.core.wmem_max`.
+const BUFFER_SIZE: usize = 4 * 1024 * 1024;
+
 pub struct MessageSocket {
     socket: UdpSocket,
     group_address: SocketAddr,
@@ -18,6 +24,7 @@ impl MessageSocket {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         socket.set_multicast_if_v4(&local_ip)?;
+        socket.set_send_buffer_size(BUFFER_SIZE)?;
         socket.set_nonblocking(true)?;
         let std_socket: std::net::UdpSocket = socket.into();
         let tokio_socket = UdpSocket::from_std(std_socket)?;
@@ -39,6 +46,7 @@ impl MessageSocket {
         socket.set_reuse_port(true)?;
         socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port + 1).into())?;
         socket.join_multicast_v4(&group_ip, &local_ip)?;
+        socket.set_recv_buffer_size(BUFFER_SIZE)?;
         socket.set_nonblocking(true)?;
         let std_socket: std::net::UdpSocket = socket.into();
         let tokio_socket = UdpSocket::from_std(std_socket)?;

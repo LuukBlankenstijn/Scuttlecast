@@ -35,6 +35,11 @@ pub struct Args {
     /// Blocks per second the sender will not exceed, even with no loss
     #[arg(long)]
     max_rate: Option<f64>,
+
+    /// Parity shards per slice. Each one lets a receiver lose one more shard
+    /// without asking for it, and costs its share of the bandwidth.
+    #[arg(long)]
+    parity: Option<u16>,
 }
 
 fn parse_seconds(s: &str) -> Result<Duration, String> {
@@ -48,6 +53,7 @@ pub async fn send(args: Args) -> Result<(), ProtoError> {
         .socket(args.local_ip, args.group_ip, args.port)?
         .maybe_min_receivers(args.min_receivers)
         .maybe_max_rate(args.max_rate)
+        .maybe_parity_per_slice(args.parity)
         .max_wait(args.wait)
         .build();
 
