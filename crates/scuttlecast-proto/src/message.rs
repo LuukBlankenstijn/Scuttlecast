@@ -3,23 +3,29 @@ use bincode::{Decode, Encode};
 use derive_more::Display;
 
 use crate::error::Error;
-use crate::payload::{Complete, Data, Done, Hello, Nack, Parity, Stats};
+use crate::payload::{Data, Done, Evicted, Hello, Nak, Parity, Stats};
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum Message {
     Hello(Hello),
     /// Receiver -> Sender, tells the sender it joined the group
-    #[display("Join(transfer_id={_0}, receiver_id={_1})")]
-    Join(u64, u64),
+    #[display("Join(transfer_id={transfer_id}, receiver_id={receiver_id})")]
+    Join {
+        transfer_id: u64,
+        receiver_id: u64,
+    },
     /// Receiver -> Sender, tells the sender it left the group
-    #[display("Leave(transfer_id={_0}, receiver_id={_1})")]
-    Leave(u64, u64),
+    #[display("Leave(transfer_id={transfer_id}, receiver_id={receiver_id})")]
+    Leave {
+        transfer_id: u64,
+        receiver_id: u64,
+    },
     Data(Data),
     Parity(Parity),
     Stats(Stats),
-    Nack(Nack),
-    Complete(Complete),
+    Nak(Nak),
+    Evicted(Evicted),
     Done(Done),
 }
 
@@ -27,13 +33,13 @@ impl Message {
     pub fn transfer_id(&self) -> u64 {
         match self {
             Message::Hello(hello) => hello.transfer_id,
-            Message::Join(transfer_id, _) => *transfer_id,
-            Message::Leave(transfer_id, _) => *transfer_id,
+            Message::Join { transfer_id, .. } => *transfer_id,
+            Message::Leave { transfer_id, .. } => *transfer_id,
             Message::Data(data) => data.transfer_id,
             Message::Parity(parity) => parity.transfer_id,
             Message::Stats(stats) => stats.transfer_id,
-            Message::Nack(nack) => nack.transfer_id,
-            Message::Complete(complete) => complete.transfer_id,
+            Message::Nak(nak) => nak.transfer_id,
+            Message::Evicted(evicted) => evicted.transfer_id,
             Message::Done(done) => done.transfer_id,
         }
     }

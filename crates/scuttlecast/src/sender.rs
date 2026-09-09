@@ -7,7 +7,7 @@ use tokio::{io::AsyncRead, time::Instant};
 use tracing::debug;
 
 use crate::{
-    BLOCK_SIZE,
+    BLOCK_SIZE, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
     sender::pacer::{Pacer, RateController, TICK_INTERVAL},
@@ -19,6 +19,7 @@ mod pacer;
 mod slicer;
 
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
+const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(8).expect("nonzero");
 
 #[derive(Builder)]
 pub struct Sender {
@@ -31,6 +32,8 @@ pub struct Sender {
     min_receivers: Option<usize>,
     #[builder(default = DEFAULT_BLOCKS_PER_SLICE)]
     blocks_per_slice: NonZeroU16,
+    #[builder(default = DEFAULT_MAX_LIVE_SLICES)]
+    max_live_slices: NonZeroU16,
 }
 
 impl Sender {
@@ -49,6 +52,7 @@ impl Sender {
         debug!("starting send with {} participants", group.len());
 
         let mut block_no = 0;
+        let mut seq = 0;
         let mut stream = Box::pin(slicer::blocks::split(reader, BLOCK_SIZE));
         let mut total_bytes = 0;
         let mut rate_controller = RateController::new();
@@ -71,12 +75,15 @@ impl Sender {
                     total_bytes += block.len() as u64;
                     let message = Message::Data(Data {
                         transfer_id,
+                        seq,
                         slice_no: Data::slice_no(block_no, self.blocks_per_slice),
                         block_in_slice: Data::block_in_slice(block_no, self.blocks_per_slice),
+                        emit_floor: Data::slice_no(block_no, self.blocks_per_slice),
                         payload: block.into(),
                     });
                     self.socket.send_to_group(message).await?;
                     block_no += 1;
+                    seq += 1;
                 }
 
                 _ = tokio::time::sleep(until_credit), if !has_credit => {}
@@ -95,12 +102,12 @@ impl Sender {
                             group.on_stats(&stats);
                             rate_controller.on_report(
                                 stats.receiver_id,
-                                stats.blocks_received,
-                                stats.blocks_expected
+                                stats.total_received,
+                                stats.total_expected
                             );
                         }
-                        Message::Leave(_, participant_id) => {
-                            group.leave(participant_id);
+                        Message::Leave { receiver_id, .. } => {
+                            group.leave(receiver_id);
                         }
                         _ => {}
                     }
@@ -122,7 +129,7 @@ impl Sender {
         let mut group = Group::default();
         let start = Instant::now();
         let deadline = start + self.max_wait;
-        let mut hello_tick = tokio::time::interval(Duration::from_millis(200));
+        let mut hello_tick = tokio::time::interval(STATS_INTERVAL);
 
         loop {
             tokio::select! {
@@ -131,16 +138,18 @@ impl Sender {
                         .send_to_group(Message::Hello(Hello {
                             transfer_id,
                             blocks_per_slice: self.blocks_per_slice,
+                            parity_per_slice: 0,
+                            max_live_slices: self.max_live_slices,
                         }))
                         .await?
                 }
 
                 r = self.socket.recv_in_transfer(transfer_id) => {
                     let (message, socket) = r?;
-                    if let Message::Join(_, receiver_id) = message && group.join(receiver_id) {
+                    if let Message::Join { receiver_id, .. } = message && group.join(receiver_id) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver joined");
                     }
-                    if let Message::Leave(_, receiver_id) = message && group.leave(receiver_id) {
+                    if let Message::Leave { receiver_id, .. } = message && group.leave(receiver_id) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver left");
                     }
                 },

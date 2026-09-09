@@ -185,12 +185,12 @@ async fn resends_blocks_of_a_short_final_slice() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_completed_slice_is_no_longer_resent() {
+async fn a_slice_nobody_needs_is_no_longer_resent() {
     let resent = resent_blocks(
         &vec![7u8; 2 * BLOCK_SIZE],
         2,
         vec![
-            Feedback::Completed(0),
+            Feedback::Needed(1),
             Feedback::Resend {
                 slice_no: 0,
                 blocks: vec![0],

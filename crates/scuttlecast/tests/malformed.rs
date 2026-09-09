@@ -11,6 +11,15 @@ fn blocks_per_slice(blocks: u16) -> NonZeroU16 {
     NonZeroU16::new(blocks).expect("nonzero blocks per slice")
 }
 
+fn hello(transfer_id: u64, blocks: u16) -> Hello {
+    Hello {
+        transfer_id,
+        blocks_per_slice: blocks_per_slice(blocks),
+        parity_per_slice: 0,
+        max_live_slices: blocks_per_slice(8),
+    }
+}
+
 async fn receive_one_transfer(
     group_id: u8,
     port: u16,
@@ -34,17 +43,14 @@ async fn receive_one_transfer(
 async fn rejects_block_index_outside_its_slice() {
     let (rogue, receiving, _output) = receive_one_transfer(80, 53000).await;
 
-    rogue
-        .send(Message::Hello(Hello {
-            transfer_id: 1,
-            blocks_per_slice: blocks_per_slice(32),
-        }))
-        .await;
+    rogue.send(Message::Hello(hello(1, 32))).await;
     rogue
         .send(Message::Data(Data {
             transfer_id: 1,
+            seq: 0,
             slice_no: 0,
             block_in_slice: 32,
+            emit_floor: 0,
             payload: Bytes::from(vec![1; 10]).into(),
         }))
         .await;
@@ -70,14 +76,14 @@ async fn rejects_block_index_outside_its_slice() {
 async fn rejects_a_hello_claiming_zero_blocks_per_slice() {
     let (rogue, receiving, _output) = receive_one_transfer(81, 53010).await;
 
-    let mut bytes = Message::Hello(Hello {
-        transfer_id: 2,
-        blocks_per_slice: blocks_per_slice(1),
-    })
-    .encode()
-    .expect("encode");
-    assert_eq!(bytes.pop(), Some(1), "blocks_per_slice trails the message");
-    bytes.push(0);
+    let mut bytes = Message::Hello(hello(2, 1)).encode().expect("encode");
+    let blocks_per_slice_byte = bytes.len() - 3;
+    assert_eq!(
+        bytes[blocks_per_slice_byte..],
+        [1, 0, 8],
+        "blocks_per_slice, parity_per_slice and max_live_slices trail the message"
+    );
+    bytes[blocks_per_slice_byte] = 0;
 
     rogue.send_bytes(&bytes).await;
 

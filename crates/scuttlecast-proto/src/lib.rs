@@ -4,6 +4,6 @@ pub mod payload;
 
 pub use error::Error;
 pub use message::Message;
-pub use payload::{Complete, Data, Done, Hello, Nack, Parity, Payload, Stats};
+pub use payload::{Data, Done, Evicted, Hello, Nak, Parity, Payload, Stats};
 
 pub const MAX_DATAGRAM_SIZE: usize = 2048;

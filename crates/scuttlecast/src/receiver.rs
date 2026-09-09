@@ -65,9 +65,10 @@ impl Receiver {
                 let message = Message::Stats(Stats {
                     transfer_id,
                     receiver_id,
-                    blocks_received: block_counter.number_of_blocks_seen(),
-                    blocks_expected: block_counter.highest_block_seen().map(|n| n + 1).unwrap_or(0),
-                    completed_through: None
+                    total_received: block_counter.number_of_blocks_seen(),
+                    total_expected: block_counter.highest_block_seen().map(|n| n + 1).unwrap_or(0),
+                    next_needed_slice: 0,
+                    sink_stall_ms: 0
                 });
                 self.socket.send_to(message, sender_socket).await?
             }
@@ -77,7 +78,7 @@ impl Receiver {
                 match message {
                     Message::Hello(_) => {
                         self.socket
-                            .send_to(Join(transfer_id, receiver_id), sender_socket)
+                                .send_to(Join { transfer_id, receiver_id }, sender_socket)
                             .await?
                     }
                     Message::Data(data) => {
@@ -129,7 +130,13 @@ impl Receiver {
         };
 
         self.socket
-            .send_to(Join(hello.transfer_id, receiver_id), sender_socket)
+            .send_to(
+                Join {
+                    transfer_id: hello.transfer_id,
+                    receiver_id,
+                },
+                sender_socket,
+            )
             .await?;
 
         Ok((hello, sender_socket))

@@ -1,22 +1,20 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use proto::{Nack, Stats};
+use proto::{Nak, Stats};
 
-/// How long a resent block suppresses further requests for it. Retransmits get
-/// lost too, so suppression has to expire or a second loss wedges the transfer.
-const SUPPRESSION: Duration = Duration::from_millis(400);
+use crate::HOLDOFF;
 
 #[derive(Default)]
 struct Participant {
-    completed_through: Option<u32>,
-    complete: bool,
+    next_needed: u32,
 }
 
 #[derive(Default)]
 pub struct Group {
     participants: HashMap<u64, Participant>,
-    completed_through: Option<u32>,
+    needed_from: u32,
+    total_slices: Option<u32>,
     suppressed: HashMap<(u32, u16), Instant>,
 }
 
@@ -45,38 +43,42 @@ impl Group {
         !self.participants.is_empty()
             && self
                 .participants
-                .values()
-                .all(|participant| participant.complete)
+                .keys()
+                .all(|receiver_id| self.is_complete(*receiver_id))
     }
 
-    /// Returns the slice the whole group has completed, if that advanced
+    /// Records how many slices the transfer turned out to have, which is what
+    /// makes a participant's progress readable as completion
+    pub fn on_eof(&mut self, total_slices: u32) {
+        self.total_slices = Some(total_slices);
+    }
+
+    /// Returns the lowest slice the group still wants, if that advanced
     pub fn on_stats(&mut self, stats: &Stats) -> Option<u32> {
-        self.participants
-            .get_mut(&stats.receiver_id)?
-            .completed_through = stats.completed_through;
+        self.participants.get_mut(&stats.receiver_id)?.next_needed = stats.next_needed_slice;
 
         self.advance()
     }
 
-    /// Returns true if the whole group now holds the transfer
-    pub fn on_complete(&mut self, receiver_id: u64) -> bool {
-        match self.participants.get_mut(&receiver_id) {
-            Some(participant) => participant.complete = true,
-            None => return false,
-        }
+    fn is_complete(&self, receiver_id: u64) -> bool {
+        let Some(total_slices) = self.total_slices else {
+            return false;
+        };
 
-        self.all_complete()
+        self.participants
+            .get(&receiver_id)
+            .is_some_and(|participant| participant.next_needed >= total_slices)
     }
 
     /// Returns the blocks that are worth putting back on the wire
-    pub fn on_nack(&mut self, nack: &Nack, now: Instant) -> Vec<u16> {
-        if !self.contains(nack.receiver_id) || self.is_completed(nack.slice_no) {
+    pub fn on_nak(&mut self, nak: &Nak, now: Instant) -> Vec<u16> {
+        if !self.contains(nak.receiver_id) || self.nobody_needs(nak.slice_no) {
             return Vec::new();
         }
 
         let mut wanted = Vec::new();
-        for &block in &nack.missing {
-            if self.suppress((nack.slice_no, block), now) {
+        for &block in &nak.missing {
+            if self.suppress((nak.slice_no, block), now) {
                 wanted.push(block);
             }
         }
@@ -84,32 +86,27 @@ impl Group {
     }
 
     fn advance(&mut self) -> Option<u32> {
-        let completed_through = self.slowest();
-        if completed_through <= self.completed_through {
+        let needed_from = self.slowest();
+        if needed_from <= self.needed_from {
             return None;
         }
-        self.completed_through = completed_through;
+        self.needed_from = needed_from;
+        self.suppressed
+            .retain(|(slice_no, _), _| *slice_no >= needed_from);
 
-        if let Some(completed_through) = completed_through {
-            self.suppressed
-                .retain(|(slice_no, _), _| *slice_no > completed_through);
-        }
-        completed_through
+        Some(needed_from)
     }
 
-    /// A participant holding the whole transfer never needs a slice retained
-    fn slowest(&self) -> Option<u32> {
+    fn slowest(&self) -> u32 {
         self.participants
             .values()
-            .filter(|participant| !participant.complete)
-            .map(|participant| participant.completed_through)
+            .map(|participant| participant.next_needed)
             .min()
-            .flatten()
+            .unwrap_or(self.needed_from)
     }
 
-    fn is_completed(&self, slice_no: u32) -> bool {
-        self.completed_through
-            .is_some_and(|completed_through| slice_no <= completed_through)
+    fn nobody_needs(&self, slice_no: u32) -> bool {
+        slice_no < self.needed_from
     }
 
     /// Records the block as requested, returning true if it was not suppressed
@@ -117,7 +114,7 @@ impl Group {
         let suppressed = self
             .suppressed
             .get(&block)
-            .is_some_and(|sent| now.duration_since(*sent) < SUPPRESSION);
+            .is_some_and(|sent| now.duration_since(*sent) < HOLDOFF);
 
         if !suppressed {
             self.suppressed.insert(block, now);
@@ -128,8 +125,8 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
-    use super::{Group, SUPPRESSION};
-    use proto::{Nack, Stats};
+    use super::{Group, HOLDOFF};
+    use proto::{Nak, Stats};
     use std::time::Instant;
 
     fn group(receiver_ids: &[u64]) -> Group {
@@ -140,18 +137,19 @@ mod tests {
         group
     }
 
-    fn stats(receiver_id: u64, completed_through: Option<u32>) -> Stats {
+    fn stats(receiver_id: u64, next_needed_slice: u32) -> Stats {
         Stats {
             transfer_id: 1,
             receiver_id,
-            blocks_received: 0,
-            blocks_expected: 0,
-            completed_through,
+            total_received: 0,
+            total_expected: 0,
+            next_needed_slice,
+            sink_stall_ms: 0,
         }
     }
 
-    fn nack(receiver_id: u64, slice_no: u32, missing: Vec<u16>) -> Nack {
-        Nack {
+    fn nak(receiver_id: u64, slice_no: u32, missing: Vec<u16>) -> Nak {
+        Nak {
             transfer_id: 1,
             receiver_id,
             slice_no,
@@ -178,57 +176,46 @@ mod tests {
     }
 
     #[test]
-    fn the_group_completes_no_further_than_its_slowest_member() {
+    fn the_group_needs_whatever_its_slowest_member_needs() {
         let mut group = group(&[7, 8]);
 
-        assert_eq!(group.on_stats(&stats(7, Some(4))), None);
-        assert_eq!(group.on_stats(&stats(8, Some(1))), Some(1));
+        assert_eq!(group.on_stats(&stats(7, 4)), None);
+        assert_eq!(group.on_stats(&stats(8, 1)), Some(1));
     }
 
     #[test]
     fn a_silent_member_holds_the_group_back() {
         let mut group = group(&[7, 8]);
 
-        assert_eq!(group.on_stats(&stats(7, Some(4))), None);
-        assert_eq!(group.on_stats(&stats(8, None)), None);
+        assert_eq!(group.on_stats(&stats(7, 4)), None);
+        assert_eq!(group.on_stats(&stats(8, 0)), None);
     }
 
     #[test]
     fn a_member_falling_behind_does_not_move_the_group_back() {
         let mut group = group(&[7]);
-        assert_eq!(group.on_stats(&stats(7, Some(4))), Some(4));
+        assert_eq!(group.on_stats(&stats(7, 4)), Some(4));
 
-        assert_eq!(group.on_stats(&stats(7, Some(2))), None);
+        assert_eq!(group.on_stats(&stats(7, 2)), None);
     }
 
     #[test]
     fn a_departing_member_stops_holding_the_group_back() {
         let mut group = group(&[7, 8]);
-        group.on_stats(&stats(7, Some(4)));
-        group.on_stats(&stats(8, None));
+        group.on_stats(&stats(7, 4));
+        group.on_stats(&stats(8, 0));
 
         group.leave(8);
 
-        assert_eq!(group.on_stats(&stats(7, Some(4))), Some(4));
-    }
-
-    #[test]
-    fn a_finished_member_stops_holding_the_group_back() {
-        let mut group = group(&[7, 8]);
-        group.on_stats(&stats(7, Some(4)));
-        group.on_stats(&stats(8, Some(1)));
-
-        group.on_complete(8);
-
-        assert_eq!(group.on_stats(&stats(7, Some(4))), Some(4));
+        assert_eq!(group.on_stats(&stats(7, 4)), Some(4));
     }
 
     #[test]
     fn stats_from_a_stranger_are_ignored() {
         let mut group = group(&[7]);
 
-        assert_eq!(group.on_stats(&stats(99, Some(4))), None);
-        assert_eq!(group.on_stats(&stats(7, Some(1))), Some(1));
+        assert_eq!(group.on_stats(&stats(99, 4)), None);
+        assert_eq!(group.on_stats(&stats(7, 1)), Some(1));
     }
 
     #[test]
@@ -237,19 +224,33 @@ mod tests {
     }
 
     #[test]
-    fn the_group_is_complete_once_every_member_says_so() {
-        let mut group = group(&[7, 8]);
+    fn nobody_is_complete_before_the_transfer_has_an_end() {
+        let mut group = group(&[7]);
 
-        assert!(!group.on_complete(7));
-        assert!(group.on_complete(8));
+        group.on_stats(&stats(7, 9));
+
+        assert!(!group.all_complete());
+    }
+
+    #[test]
+    fn the_group_is_complete_once_every_member_reaches_the_end() {
+        let mut group = group(&[7, 8]);
+        group.on_eof(4);
+
+        group.on_stats(&stats(7, 4));
+        assert!(!group.all_complete());
+
+        group.on_stats(&stats(8, 4));
         assert!(group.all_complete());
     }
 
     #[test]
-    fn a_stranger_cannot_complete_the_group() {
+    fn a_member_short_of_the_end_leaves_the_group_incomplete() {
         let mut group = group(&[7]);
+        group.on_eof(4);
 
-        assert!(!group.on_complete(99));
+        group.on_stats(&stats(7, 3));
+
         assert!(!group.all_complete());
     }
 
@@ -258,13 +259,10 @@ mod tests {
         let mut group = group(&[7]);
         let now = Instant::now();
 
-        assert_eq!(group.on_nack(&nack(7, 3, vec![1, 2]), now), vec![1, 2]);
+        assert_eq!(group.on_nak(&nak(7, 3, vec![1, 2]), now), vec![1, 2]);
+        assert_eq!(group.on_nak(&nak(7, 3, vec![1, 2]), now), Vec::<u16>::new());
         assert_eq!(
-            group.on_nack(&nack(7, 3, vec![1, 2]), now),
-            Vec::<u16>::new()
-        );
-        assert_eq!(
-            group.on_nack(&nack(7, 3, vec![1, 2]), now + SUPPRESSION),
+            group.on_nak(&nak(7, 3, vec![1, 2]), now + HOLDOFF),
             vec![1, 2]
         );
     }
@@ -274,21 +272,21 @@ mod tests {
         let mut group = group(&[7]);
 
         assert_eq!(
-            group.on_nack(&nack(7, 3, vec![1, 1]), Instant::now()),
+            group.on_nak(&nak(7, 3, vec![1, 1]), Instant::now()),
             vec![1]
         );
     }
 
     #[test]
-    fn requests_for_completed_slices_are_dropped() {
+    fn requests_for_slices_nobody_needs_are_dropped() {
         let mut group = group(&[7]);
-        group.on_stats(&stats(7, Some(3)));
+        group.on_stats(&stats(7, 4));
 
         assert_eq!(
-            group.on_nack(&nack(7, 3, vec![0]), Instant::now()),
+            group.on_nak(&nak(7, 3, vec![0]), Instant::now()),
             Vec::<u16>::new()
         );
-        assert_eq!(group.on_nack(&nack(7, 4, vec![0]), Instant::now()), vec![0]);
+        assert_eq!(group.on_nak(&nak(7, 4, vec![0]), Instant::now()), vec![0]);
     }
 
     #[test]
@@ -296,21 +294,21 @@ mod tests {
         let mut group = group(&[7]);
 
         assert_eq!(
-            group.on_nack(&nack(99, 3, vec![0]), Instant::now()),
+            group.on_nak(&nak(99, 3, vec![0]), Instant::now()),
             Vec::<u16>::new()
         );
     }
 
     #[test]
-    fn completing_a_slice_forgets_its_suppressed_blocks() {
+    fn advancing_past_a_slice_forgets_its_suppressed_blocks() {
         let mut group = group(&[7]);
         let now = Instant::now();
-        group.on_nack(&nack(7, 3, vec![0]), now);
-        group.on_nack(&nack(7, 4, vec![0]), now);
+        group.on_nak(&nak(7, 3, vec![0]), now);
+        group.on_nak(&nak(7, 4, vec![0]), now);
 
-        group.on_stats(&stats(7, Some(3)));
+        group.on_stats(&stats(7, 4));
 
         assert_eq!(group.suppressed.len(), 1);
-        assert_eq!(group.on_nack(&nack(7, 4, vec![0]), now), Vec::<u16>::new());
+        assert_eq!(group.on_nak(&nak(7, 4, vec![0]), now), Vec::<u16>::new());
     }
 }

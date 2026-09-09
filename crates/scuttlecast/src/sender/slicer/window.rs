@@ -38,6 +38,12 @@ impl Window {
         self.live.len() >= self.max_live_slices
     }
 
+    /// Slices whose every block has been queued at least once. Dropping slices
+    /// the group no longer needs never moves it back.
+    pub(super) fn emit_floor(&self) -> u32 {
+        self.current.slice_no
+    }
+
     pub(super) fn push(&mut self, payload: Bytes) -> (u32, u16) {
         let coordinates = (self.current.slice_no, self.current.blocks.len() as u16);
         self.current.blocks.push(payload);
@@ -58,11 +64,11 @@ impl Window {
             .push_back(std::mem::replace(&mut self.current, next));
     }
 
-    pub(super) fn retain_after(&mut self, slice_no: u32) {
+    pub(super) fn retain_from(&mut self, first_needed: u32) {
         while self
             .live
             .front()
-            .is_some_and(|slice| slice.slice_no <= slice_no)
+            .is_some_and(|slice| slice.slice_no < first_needed)
         {
             self.live.pop_front();
         }
@@ -160,11 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn retaining_drops_the_named_slice_and_everything_below() {
+    fn retaining_drops_every_slice_below_the_one_needed() {
         let mut window = window(2, 8);
         push(&mut window, 6);
 
-        window.retain_after(1);
+        window.retain_from(2);
 
         assert_eq!(window.block(0, 0), None);
         assert_eq!(window.block(1, 0), None);
@@ -177,7 +183,7 @@ mod tests {
         push(&mut window, 4);
         assert!(window.is_full());
 
-        window.retain_after(0);
+        window.retain_from(1);
 
         assert!(!window.is_full());
     }

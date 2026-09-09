@@ -55,7 +55,7 @@ impl Slicer {
                 },
 
                 message = feedback.recv() => match message {
-                    Some(Feedback::Completed(slice_no)) => self.window.retain_after(slice_no),
+                    Some(Feedback::Needed(first_needed)) => self.window.retain_from(first_needed),
                     Some(Feedback::Resend { slice_no, blocks }) => {
                         self.resend(slice_no, &blocks, &outbound).await?
                     }
@@ -80,6 +80,7 @@ impl Slicer {
             Outbound::Block {
                 slice_no,
                 block_in_slice,
+                emit_floor: self.window.emit_floor(),
                 payload,
             },
         )
@@ -99,6 +100,7 @@ impl Slicer {
                     Outbound::Block {
                         slice_no,
                         block_in_slice,
+                        emit_floor: self.window.emit_floor(),
                         payload: payload.clone(),
                     },
                 )

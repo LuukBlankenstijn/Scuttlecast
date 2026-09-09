@@ -7,6 +7,10 @@ pub enum Outbound {
     Block {
         slice_no: u32,
         block_in_slice: u16,
+        /// Slices whose every block has been queued at least once. Stamped on
+        /// every message rather than announced once, so a receiver that missed
+        /// earlier traffic still learns it.
+        emit_floor: u32,
         payload: Bytes,
     },
     Eof {
@@ -16,8 +20,8 @@ pub enum Outbound {
 }
 
 pub enum Feedback {
-    /// Every participant holds this slice and all slices below it in full
-    Completed(u32),
+    /// The lowest slice any participant still needs
+    Needed(u32),
     Resend {
         slice_no: u32,
         blocks: Vec<u16>,

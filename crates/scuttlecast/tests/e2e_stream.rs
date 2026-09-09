@@ -81,15 +81,20 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
         liar.send_to(&bytes, destination).await.expect("send");
     };
 
+    let nonzero = |n: u16| std::num::NonZeroU16::new(n).expect("nonzero");
     send(Message::Hello(Hello {
         transfer_id,
-        blocks_per_slice: std::num::NonZeroU16::new(32).expect("nonzero"),
+        blocks_per_slice: nonzero(32),
+        parity_per_slice: 0,
+        max_live_slices: nonzero(8),
     }))
     .await;
     send(Message::Data(Data {
         transfer_id,
+        seq: 0,
         slice_no: 0,
         block_in_slice: 0,
+        emit_floor: 0,
         payload: Bytes::from(vec![1; 100]).into(),
     }))
     .await;
