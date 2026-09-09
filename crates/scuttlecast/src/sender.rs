@@ -37,6 +37,16 @@ const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero
 /// unlucky enough to lose twice its share needs a repair anyway and the shards
 /// bought nothing.
 const PARITY_HEADROOM: f64 = 2.0;
+
+/// Waiting on the source for less than this much of a tick is what any
+/// pipeline does between blocks. Above it the sender is genuinely being fed
+/// too slowly, which a spinning disk does long before it stalls outright.
+const SOURCE_WAIT_FLOOR: Duration = Duration::from_millis(TICK_INTERVAL.as_millis() as u64 / 8);
+
+/// A receiver waiting this much of a reporting window to hand its blocks on is
+/// being fed faster than it can write. Below it, a sink that pauses between
+/// writes is just a pipeline breathing.
+const SINK_STALL_FLOOR: u32 = STATS_INTERVAL.as_millis() as u32 / 4;
 const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
 /// Blocks taken from the slicer per pass through the send loop. Each pass
@@ -326,7 +336,9 @@ impl Sender {
             demand_threshold: REPAIR_THRESHOLD,
             max_live_slices: self.max_live_slices.get() as u32,
             at_ceiling: rate_controller.at_ceiling(),
-            source_wait: source_wait.max(TICK_INTERVAL / 2) - TICK_INTERVAL / 2,
+            source_wait: source_wait.saturating_sub(SOURCE_WAIT_FLOOR),
+            worst_sink_stall: group.worst_sink_stall(),
+            sink_stall_threshold: SINK_STALL_FLOOR,
             allowed_rate: rate_controller.rate(),
             achieved_rate: sent_this_tick as f64 / TICK_INTERVAL.as_secs_f64(),
             credit_unused,

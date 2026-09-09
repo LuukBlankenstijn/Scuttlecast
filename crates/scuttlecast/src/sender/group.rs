@@ -202,6 +202,17 @@ impl Group {
             .reduce(f64::max)
     }
 
+    /// The receiver that spent the most of its last reporting window unable to
+    /// write what it had received. A receiver that cannot keep up backs its own
+    /// socket up, and the sender's socket behind it, so this is the difference
+    /// between blaming a slow disk and blaming the sender.
+    pub fn worst_sink_stall(&self) -> Option<(u64, u32)> {
+        self.participants
+            .iter()
+            .max_by_key(|(_, participant)| participant.sink_stall_ms)
+            .map(|(receiver_id, participant)| (*receiver_id, participant.sink_stall_ms))
+    }
+
     fn slices_behind(&self, participant: &Participant) -> u32 {
         self.emitted.saturating_sub(participant.next_needed)
     }

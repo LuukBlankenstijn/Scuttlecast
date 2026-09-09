@@ -22,6 +22,13 @@ pub enum LimitingFactor {
     SourceStarved {
         read_wait_ms: u32,
     },
+    /// A receiver cannot write what it is being sent as fast as it arrives.
+    /// Its socket backs up, which backs the sender's socket up in turn, so
+    /// without this the sender looks like its own bottleneck.
+    SinkStalled {
+        receiver: u64,
+        stall_ms: u32,
+    },
     /// The sender cannot push its own socket any faster, so the allowance
     /// goes unused
     SenderBound {
@@ -50,6 +57,10 @@ impl std::fmt::Display for LimitingFactor {
             Self::SourceStarved { read_wait_ms } => {
                 write!(f, "input starved, waited {read_wait_ms}ms")
             }
+            Self::SinkStalled { receiver, stall_ms } => write!(
+                f,
+                "sink of {receiver} stalled, {stall_ms}ms of the last tick spent waiting to write"
+            ),
             Self::SenderBound { allowed, achieved } => write!(
                 f,
                 "sender bound, sending {achieved:.0} of {allowed:.0} allowed blocks per second"
@@ -71,6 +82,10 @@ pub struct Bottleneck {
     pub at_ceiling: bool,
     /// Time spent with sending credit but nothing to send
     pub source_wait: Duration,
+    /// The receiver that spent the most of the last tick unable to write what
+    /// it had already received, and how long
+    pub worst_sink_stall: Option<(u64, u32)>,
+    pub sink_stall_threshold: u32,
     pub allowed_rate: f64,
     pub achieved_rate: f64,
     /// The pacer had permission to send and did not use it, which rules out
@@ -109,6 +124,11 @@ impl Bottleneck {
             };
         }
 
+        if let Some((receiver, stall_ms)) = self.worst_sink_stall
+            && stall_ms >= self.sink_stall_threshold
+        {
+            return LimitingFactor::SinkStalled { receiver, stall_ms };
+        }
         if self.at_ceiling {
             return LimitingFactor::AtConfiguredMax;
         }
@@ -182,6 +202,8 @@ mod tests {
             max_live_slices: 512,
             at_ceiling: false,
             source_wait: Duration::ZERO,
+            worst_sink_stall: Some((7, 0)),
+            sink_stall_threshold: 25,
             allowed_rate: 1000.0,
             achieved_rate: 1000.0,
             credit_unused: true,
@@ -202,6 +224,56 @@ mod tests {
             LimitingFactor::SenderBound {
                 allowed: 1000.0,
                 achieved: 300.0
+            }
+        );
+    }
+
+    /// A receiver that cannot write fast enough backs up its own socket, and
+    /// the sender's socket behind it, so the sender looks like its own limit.
+    /// Naming the disk is the whole point of the report.
+    #[test]
+    fn a_receiver_that_cannot_write_outranks_the_senders_own_socket() {
+        let bottleneck = Bottleneck {
+            allowed_rate: 1000.0,
+            achieved_rate: 300.0,
+            worst_sink_stall: Some((9, 60)),
+            ..healthy()
+        };
+
+        assert_eq!(
+            bottleneck.attribute(),
+            LimitingFactor::SinkStalled {
+                receiver: 9,
+                stall_ms: 60
+            }
+        );
+    }
+
+    #[test]
+    fn a_sink_pausing_briefly_between_writes_is_not_a_limit() {
+        let bottleneck = Bottleneck {
+            worst_sink_stall: Some((9, 24)),
+            ..healthy()
+        };
+
+        assert_eq!(bottleneck.attribute(), LimitingFactor::Unconstrained);
+    }
+
+    /// Repairs cost throughput directly, and a receiver asking for them is
+    /// usually also the one whose sink is behind, so loss stays the headline.
+    #[test]
+    fn repairs_outrank_a_stalled_sink() {
+        let bottleneck = Bottleneck {
+            worst_demand: Some((9, 0.2)),
+            worst_sink_stall: Some((9, 60)),
+            ..healthy()
+        };
+
+        assert_eq!(
+            bottleneck.attribute(),
+            LimitingFactor::RateLimited {
+                worst: 9,
+                demand: 0.2
             }
         );
     }
