@@ -5,6 +5,11 @@ use std::time::{Duration, Instant};
 use crate::{HOLDOFF, state::ReceiverState};
 use proto::{Nak, Stats};
 
+/// Transmissions a reporting window needs before its loss ratio means
+/// anything. Below this a single drop reads as a loss rate high enough to
+/// throttle a healthy network.
+const MIN_LOSS_SAMPLE: u64 = 200;
+
 struct Participant {
     address: SocketAddr,
     next_needed: u32,
@@ -109,8 +114,11 @@ impl Group {
         stale
     }
 
-    /// Windowed change in `(received, expected)` since the participant's last
-    /// report, or `None` for a first, duplicate, or reordered report
+    /// Change in `(received, expected)` since the last report the rate
+    /// controller was told about, or `None` while too little has happened to
+    /// read a rate from. A window holding twenty packets calls one loss five
+    /// percent, which is enough to end slow start on a healthy network, so
+    /// windows accumulate until they can carry a verdict.
     pub fn report_delta(&mut self, stats: &Stats) -> Option<(u64, u64)> {
         let participant = self.participants.get_mut(&stats.receiver_id)?;
         let current = (stats.total_received, stats.total_expected);
@@ -118,17 +126,24 @@ impl Group {
         if current.1 > 0 {
             participant.cumulative_loss = 1.0 - current.0 as f64 / current.1 as f64;
         }
-        let delta = participant.last_report.and_then(|(seen, expected)| {
-            (current.1 > expected && current.0 >= seen)
-                .then(|| (current.0 - seen, current.1 - expected))
-        });
-        if participant.last_report.is_none() || delta.is_some() {
+
+        let Some((seen, expected)) = participant.last_report else {
             participant.last_report = Some(current);
+            return None;
+        };
+        if current.1 <= expected || current.0 < seen {
+            return None;
         }
-        if let Some((seen, expected)) = delta {
-            participant.windowed_loss = 1.0 - seen as f64 / expected as f64;
+
+        let delta = (current.0 - seen, current.1 - expected);
+        if delta.1 < MIN_LOSS_SAMPLE {
+            return None;
         }
-        delta
+
+        participant.last_report = Some(current);
+        participant.windowed_loss = 1.0 - delta.0 as f64 / delta.1 as f64;
+
+        Some(delta)
     }
 
     /// A snapshot of every participant for reporting, slowest last
@@ -465,7 +480,10 @@ mod tests {
         let mut group = group(&[7]);
         group.report_delta(&report(7, 100, 100));
 
-        assert_eq!(group.report_delta(&report(7, 190, 200)), Some((90, 100)));
+        assert_eq!(
+            group.report_delta(&report(7, 1090, 1100)),
+            Some((990, 1000))
+        );
     }
 
     #[test]
@@ -490,18 +508,39 @@ mod tests {
         group.report_delta(&report(7, 190, 200));
         group.report_delta(&report(7, 100, 100));
 
-        assert_eq!(group.report_delta(&report(7, 290, 300)), Some((100, 100)));
+        assert_eq!(
+            group.report_delta(&report(7, 1190, 1200)),
+            Some((1000, 1000))
+        );
+    }
+
+    #[test]
+    fn a_window_too_small_to_read_a_rate_from_yields_no_delta() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 0, 0));
+
+        assert_eq!(group.report_delta(&report(7, 19, 20)), None);
+    }
+
+    #[test]
+    fn windows_too_small_on_their_own_accumulate_into_one() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 0, 0));
+
+        assert_eq!(group.report_delta(&report(7, 95, 100)), None);
+        assert_eq!(group.report_delta(&report(7, 190, 200)), Some((190, 200)));
     }
 
     #[test]
     fn the_reported_rows_carry_both_loss_measures() {
         let mut group = group(&[7]);
+        group.report_delta(&report(7, 0, 0));
         group.report_delta(&report(7, 150, 200));
-        group.report_delta(&report(7, 200, 300));
+        group.report_delta(&report(7, 250, 400));
 
         let row = &group.rows()[0];
 
-        assert_eq!(row.lifetime_loss, 1.0 - 200.0 / 300.0);
+        assert_eq!(row.lifetime_loss, 1.0 - 250.0 / 400.0);
         assert_eq!(row.windowed_loss, 0.5);
     }
 
