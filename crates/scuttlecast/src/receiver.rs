@@ -7,7 +7,7 @@ use std::{
 
 use bon::Builder;
 use bytes::Bytes;
-use proto::{Data, Done, Hello, Message, Nak, Stats};
+use proto::{Data, Done, Hello, Message, Nak, Parity, Stats};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -41,7 +41,12 @@ pub struct TransferSummary {
     pub total_blocks: u64,
     pub received: u64,
     pub expected: u64,
+    /// Shards that arrived twice, which means something was repaired more
+    /// than it needed to be
     pub duplicates: u64,
+    /// Shards for slices already written out, which is the normal cost of
+    /// reconstructing a slice before its last shards arrive
+    pub late: u64,
     pub naks_sent: u64,
 }
 
@@ -174,6 +179,7 @@ struct Session {
     received: u64,
     highest_seq: Option<u64>,
     duplicates: u64,
+    late: u64,
     total_bytes: Option<u64>,
     written_bytes: u64,
     blocks_written: u64,
@@ -195,13 +201,18 @@ impl Session {
             transfer_id: hello.transfer_id,
             receiver_id,
             blocks_per_slice: hello.blocks_per_slice,
-            assembler: Assembler::new(hello.blocks_per_slice, hello.max_live_slices),
+            assembler: Assembler::new(
+                hello.blocks_per_slice,
+                hello.parity_per_slice,
+                hello.max_live_slices,
+            ),
             naks: Naks::default(),
             blocks,
             emit_floor: 0,
             received: 0,
             highest_seq: None,
             duplicates: 0,
+            late: 0,
             total_bytes: None,
             written_bytes: 0,
             blocks_written: 0,
@@ -251,6 +262,7 @@ impl Session {
     async fn on_message(&mut self, message: Message) -> Result<(), ProtoError> {
         match message {
             Message::Data(data) => self.on_data(data).await?,
+            Message::Parity(parity) => self.on_parity(parity).await?,
             Message::Done(done) => self.on_done(done).await?,
             Message::Hello(_) if self.received == 0 => {
                 self.socket
@@ -285,7 +297,7 @@ impl Session {
             .assembler
             .insert(data.slice_no, data.block_in_slice, data.payload.into())
         {
-            self.duplicates += 1;
+            self.refused(data.slice_no);
         }
 
         self.write_ready().await?;
@@ -294,6 +306,39 @@ impl Session {
             self.request_gaps().await?;
         }
         Ok(())
+    }
+
+    async fn on_parity(&mut self, parity: Parity) -> Result<(), ProtoError> {
+        self.received += 1;
+        self.highest_seq = Some(self.highest_seq.unwrap_or(0).max(parity.seq));
+
+        let floor_advanced = parity.emit_floor > self.emit_floor;
+        self.emit_floor = self.emit_floor.max(parity.emit_floor);
+
+        let slot = self.blocks_per_slice.get() + parity.parity_index;
+        if !self
+            .assembler
+            .insert(parity.slice_no, slot, parity.payload.into())
+        {
+            self.refused(parity.slice_no);
+        }
+
+        self.write_ready().await?;
+
+        if floor_advanced {
+            self.request_gaps().await?;
+        }
+        Ok(())
+    }
+
+    /// A shard the assembler would not take is either late, because its slice
+    /// was already reconstructed and written, or a genuine duplicate
+    fn refused(&mut self, slice_no: u32) {
+        if slice_no < self.assembler.next_needed() {
+            self.late += 1;
+        } else {
+            self.duplicates += 1;
+        }
     }
 
     async fn on_done(&mut self, done: Done) -> Result<(), ProtoError> {
@@ -399,6 +444,7 @@ impl Session {
             received: self.received,
             expected: self.highest_seq.map_or(0, |seq| seq + 1),
             duplicates: self.duplicates,
+            late: self.late,
             naks_sent: self.naks.total(),
         }
     }

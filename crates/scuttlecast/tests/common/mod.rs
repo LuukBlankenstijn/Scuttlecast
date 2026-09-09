@@ -79,6 +79,16 @@ pub fn sender_windowed(
         .build()
 }
 
+pub fn sender_without_parity(group_ip: Ipv4Addr, port: u16, min_receivers: usize) -> Sender {
+    Sender::builder()
+        .socket(LOCAL, group_ip, port)
+        .expect("bind sender")
+        .min_receivers(min_receivers)
+        .max_wait(MAX_WAIT)
+        .parity_per_slice(0)
+        .build()
+}
+
 pub struct Output {
     dir: TempDir,
 }

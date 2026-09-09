@@ -171,7 +171,7 @@ async fn serves_one_repair_for_a_loss_every_receiver_suffered() {
         })
         .collect();
 
-    common::sender(group, port, 3)
+    common::sender_without_parity(group, port, 3)
         .send_stream(common::source(&sent))
         .await
         .expect("send");
@@ -184,5 +184,41 @@ async fn serves_one_repair_for_a_loss_every_receiver_suffered() {
             "the same loss was repaired more than once: {summary:?}"
         );
         assert!(summary.naks_sent > 0, "nothing was repaired: {summary:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovers_from_parity_without_asking_for_anything() {
+    let sent = common::payload(3 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
+    let group = common::group(56);
+    let port = 50060;
+    let output = common::Output::new();
+
+    let receiving: Vec<_> = (0..3)
+        .map(|index| {
+            let path = output.path(&format!("receiver{index}.bin"));
+            let receiver = common::receiver(group, port).losing(every_nth_block(8, index));
+            let read_back = path.clone();
+            (
+                tokio::spawn(async move { receiver.recv_file(path).await }),
+                read_back,
+            )
+        })
+        .collect();
+
+    common::sender(group, port, 3)
+        .send_stream(common::source(&sent))
+        .await
+        .expect("send");
+
+    for (handle, path) in receiving {
+        let summary = handle.await.expect("join").expect("receive");
+
+        assert_eq!(
+            summary.naks_sent, 0,
+            "parity should have covered the loss: {summary:?}"
+        );
+        assert!(summary.loss() > 0.0, "nothing was lost: {summary:?}");
+        assert_eq!(std::fs::read(&path).expect("read output"), sent);
     }
 }

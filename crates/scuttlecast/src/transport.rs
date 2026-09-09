@@ -95,9 +95,11 @@ impl MessageSocket {
     }
 }
 
+type Rule = Arc<dyn Fn(&Message) -> bool + Send + Sync>;
+
 /// A rule deciding which arriving datagrams to pretend never arrived
 #[derive(Clone, Default)]
-pub struct Losing(Option<Arc<dyn Fn(&Message) -> bool + Send + Sync>>);
+pub struct Losing(Option<Rule>);
 
 impl Losing {
     pub fn every(rule: impl Fn(&Message) -> bool + Send + Sync + 'static) -> Self {

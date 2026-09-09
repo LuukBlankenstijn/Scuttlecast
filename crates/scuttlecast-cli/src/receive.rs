@@ -46,6 +46,7 @@ pub async fn receive(args: Args) -> Result<(), ProtoError> {
         bytes = summary.total_bytes,
         blocks = summary.total_blocks,
         duplicates = summary.duplicates,
+        late = summary.late,
         naks = summary.naks_sent,
         loss = format!("{:.2}%", summary.loss() * 100.0),
         "transfer complete"

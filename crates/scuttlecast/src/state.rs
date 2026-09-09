@@ -20,6 +20,12 @@ pub enum LimitingFactor {
     SourceStarved {
         read_wait_ms: u32,
     },
+    /// The sender cannot push its own socket any faster, so the allowance
+    /// goes unused
+    SenderBound {
+        allowed: f64,
+        achieved: f64,
+    },
 }
 
 impl std::fmt::Display for LimitingFactor {
@@ -40,6 +46,10 @@ impl std::fmt::Display for LimitingFactor {
             Self::SourceStarved { read_wait_ms } => {
                 write!(f, "input starved, waited {read_wait_ms}ms")
             }
+            Self::SenderBound { allowed, achieved } => write!(
+                f,
+                "sender bound, sending {achieved:.0} of {allowed:.0} allowed blocks per second"
+            ),
         }
     }
 }
@@ -55,8 +65,17 @@ pub struct Bottleneck {
     pub at_ceiling: bool,
     /// Time spent with sending credit but nothing to send
     pub source_wait: Duration,
+    pub allowed_rate: f64,
+    pub achieved_rate: f64,
+    /// The pacer had permission to send and did not use it, which rules out
+    /// the pacer itself being the constraint
+    pub credit_unused: bool,
     pub draining: bool,
 }
+
+/// How much of its allowance the sender has to be missing before its own
+/// socket counts as the constraint
+const UNUSED_ALLOWANCE: f64 = 0.8;
 
 impl Bottleneck {
     /// Order matters. A window held open by one receiver still shows a healthy
@@ -86,6 +105,13 @@ impl Bottleneck {
 
         if self.at_ceiling {
             return LimitingFactor::AtConfiguredMax;
+        }
+
+        if self.credit_unused && self.achieved_rate < self.allowed_rate * UNUSED_ALLOWANCE {
+            return LimitingFactor::SenderBound {
+                allowed: self.allowed_rate,
+                achieved: self.achieved_rate,
+            };
         }
 
         LimitingFactor::Unconstrained
@@ -144,8 +170,51 @@ mod tests {
             max_live_slices: 512,
             at_ceiling: false,
             source_wait: Duration::ZERO,
+            allowed_rate: 1000.0,
+            achieved_rate: 1000.0,
+            credit_unused: true,
             draining: false,
         }
+    }
+
+    #[test]
+    fn an_allowance_the_sender_cannot_use_is_the_senders_own_limit() {
+        let bottleneck = Bottleneck {
+            allowed_rate: 1000.0,
+            achieved_rate: 300.0,
+            ..healthy()
+        };
+
+        assert_eq!(
+            bottleneck.attribute(),
+            LimitingFactor::SenderBound {
+                allowed: 1000.0,
+                achieved: 300.0
+            }
+        );
+    }
+
+    #[test]
+    fn an_allowance_nearly_used_up_is_not_a_limit() {
+        let bottleneck = Bottleneck {
+            allowed_rate: 1000.0,
+            achieved_rate: 900.0,
+            ..healthy()
+        };
+
+        assert_eq!(bottleneck.attribute(), LimitingFactor::Unconstrained);
+    }
+
+    #[test]
+    fn an_allowance_the_pacer_itself_used_up_is_not_the_senders_limit() {
+        let bottleneck = Bottleneck {
+            allowed_rate: 1000.0,
+            achieved_rate: 300.0,
+            credit_unused: false,
+            ..healthy()
+        };
+
+        assert_eq!(bottleneck.attribute(), LimitingFactor::Unconstrained);
     }
 
     #[test]

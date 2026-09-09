@@ -11,8 +11,8 @@ pub enum ProtoError {
     #[error(transparent)]
     Protocol(#[from] proto::Error),
 
-    #[error("invalid address: {0}")]
-    AddrParse(#[from] std::net::AddrParseError),
+    #[error("invalid erasure-coding configuration: {0}")]
+    Fec(#[from] reed_solomon_erasure::Error),
 
     #[error("Timeout: {0}")]
     Timeout(String),

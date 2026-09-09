@@ -13,6 +13,12 @@ pub enum Outbound {
         emit_floor: u32,
         payload: Bytes,
     },
+    Parity {
+        slice_no: u32,
+        parity_index: u16,
+        emit_floor: u32,
+        payload: Bytes,
+    },
     Eof {
         total_bytes: u64,
         total_blocks: u64,

@@ -6,7 +6,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 
 use crate::sender::slicer::channel::{Feedback, Outbound};
-use crate::sender::slicer::window::Window;
+use crate::sender::slicer::window::{Sealed, Window};
 use crate::{BLOCK_SIZE, error::ProtoError};
 
 pub mod blocks;
@@ -18,17 +18,25 @@ mod tests;
 
 pub struct Slicer {
     window: Window,
+    blocks_per_slice: u16,
+    emit_floor: u32,
     total_bytes: u64,
     total_blocks: u64,
 }
 
 impl Slicer {
-    pub fn new(blocks_per_slice: NonZeroU16, max_live_slices: NonZeroUsize) -> Self {
-        Self {
-            window: Window::new(blocks_per_slice, max_live_slices),
+    pub fn new(
+        blocks_per_slice: NonZeroU16,
+        parity_per_slice: u16,
+        max_live_slices: NonZeroUsize,
+    ) -> Result<Self, reed_solomon_erasure::Error> {
+        Ok(Self {
+            window: Window::new(blocks_per_slice, parity_per_slice, max_live_slices)?,
+            blocks_per_slice: blocks_per_slice.get(),
+            emit_floor: 0,
             total_bytes: 0,
             total_blocks: 0,
-        }
+        })
     }
 
     pub async fn run(
@@ -46,7 +54,9 @@ impl Slicer {
                     Some(block) => self.push(block.map_err(ProtoError::File)?, &outbound).await?,
                     None => {
                         drained = true;
-                        self.window.seal();
+                        if let Some(sealed) = self.window.seal() {
+                            self.queue_parity(sealed, &outbound).await?;
+                        }
                         channel::send(&outbound, Outbound::Eof {
                             total_bytes: self.total_bytes,
                             total_blocks: self.total_blocks,
@@ -73,39 +83,76 @@ impl Slicer {
     ) -> Result<(), ProtoError> {
         self.total_bytes += payload.len() as u64;
         self.total_blocks += 1;
-        let (slice_no, block_in_slice) = self.window.push(payload.clone());
+        let pushed = self.window.push(payload.clone());
 
         channel::send(
             outbound,
             Outbound::Block {
-                slice_no,
-                block_in_slice,
-                emit_floor: self.window.emit_floor(),
+                slice_no: pushed.slice_no,
+                block_in_slice: pushed.block_in_slice,
+                emit_floor: self.emit_floor,
                 payload,
             },
         )
-        .await
+        .await?;
+
+        if let Some(sealed) = pushed.sealed {
+            self.queue_parity(sealed, outbound).await?;
+        }
+        Ok(())
+    }
+
+    /// Queues every parity shard of a freshly sealed slice, then advances the
+    /// emit floor past it: a slice is only fully queued once its parity is out.
+    async fn queue_parity(
+        &mut self,
+        sealed: Sealed,
+        outbound: &mpsc::Sender<Outbound>,
+    ) -> Result<(), ProtoError> {
+        let slice_no = sealed.slice_no;
+        for (parity_index, payload) in sealed.parity.into_iter().enumerate() {
+            channel::send(
+                outbound,
+                Outbound::Parity {
+                    slice_no,
+                    parity_index: parity_index as u16,
+                    emit_floor: self.emit_floor,
+                    payload,
+                },
+            )
+            .await?;
+        }
+        self.emit_floor = slice_no + 1;
+        Ok(())
     }
 
     async fn resend(
         &self,
         slice_no: u32,
-        blocks: &[u16],
+        slots: &[u16],
         outbound: &mpsc::Sender<Outbound>,
     ) -> Result<(), ProtoError> {
-        for &block_in_slice in blocks {
-            if let Some(payload) = self.window.block(slice_no, block_in_slice) {
-                channel::send(
-                    outbound,
-                    Outbound::Block {
-                        slice_no,
-                        block_in_slice,
-                        emit_floor: self.window.emit_floor(),
-                        payload: payload.clone(),
-                    },
-                )
-                .await?;
-            }
+        for &slot in slots {
+            let Some(payload) = self.window.shard(slice_no, slot) else {
+                continue;
+            };
+            let payload = payload.clone();
+            let message = if slot < self.blocks_per_slice {
+                Outbound::Block {
+                    slice_no,
+                    block_in_slice: slot,
+                    emit_floor: self.emit_floor,
+                    payload,
+                }
+            } else {
+                Outbound::Parity {
+                    slice_no,
+                    parity_index: slot - self.blocks_per_slice,
+                    emit_floor: self.emit_floor,
+                    payload,
+                }
+            };
+            channel::send(outbound, message).await?;
         }
         Ok(())
     }

@@ -5,14 +5,26 @@ use std::io::Cursor;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tokio::sync::mpsc;
 
-fn slicer(blocks_per_slice: u16) -> Slicer {
-    Slicer::new(
-        NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
-        NonZeroUsize::new(32).expect("max live slices"),
-    )
+#[derive(Debug, PartialEq)]
+enum Resent {
+    Block(u32, u16),
+    Parity(u32, u16),
 }
 
-async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
+fn slicer(blocks_per_slice: u16) -> Slicer {
+    fec_slicer(blocks_per_slice, 0)
+}
+
+fn fec_slicer(blocks_per_slice: u16, parity_per_slice: u16) -> Slicer {
+    Slicer::new(
+        NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
+        parity_per_slice,
+        NonZeroUsize::new(32).expect("max live slices"),
+    )
+    .expect("slicer")
+}
+
+async fn drive(slicer: Slicer, input: &[u8]) -> Vec<Outbound> {
     let (outbound, mut collected) = mpsc::channel(256);
     let (feedback, feedback_rx) = mpsc::unbounded_channel();
 
@@ -28,7 +40,7 @@ async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
         seen
     });
 
-    slicer(blocks_per_slice)
+    slicer
         .run(Cursor::new(input.to_vec()), outbound, feedback_rx)
         .await
         .expect("run");
@@ -36,13 +48,22 @@ async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
     collecting.await.expect("collect")
 }
 
+async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
+    drive(slicer(blocks_per_slice), input).await
+}
+
+async fn fec_run(input: &[u8], blocks_per_slice: u16, parity_per_slice: u16) -> Vec<Outbound> {
+    drive(fec_slicer(blocks_per_slice, parity_per_slice), input).await
+}
+
 /// Feeds the requests once the whole input has been sent, then collects the
-/// coordinates of everything the slicer sends afterwards
-async fn resent_blocks(
+/// shards the slicer sends afterwards
+async fn resent_shards(
     input: &[u8],
     blocks_per_slice: u16,
+    parity_per_slice: u16,
     mut requests: Vec<Feedback>,
-) -> Vec<(u32, u16)> {
+) -> Vec<Resent> {
     let (outbound, mut collected) = mpsc::channel(256);
     let (feedback, feedback_rx) = mpsc::unbounded_channel();
 
@@ -63,19 +84,39 @@ async fn resent_blocks(
                     slice_no,
                     block_in_slice,
                     ..
-                } if past_eof => resent.push((slice_no, block_in_slice)),
-                Outbound::Block { .. } => {}
+                } if past_eof => resent.push(Resent::Block(slice_no, block_in_slice)),
+                Outbound::Parity {
+                    slice_no,
+                    parity_index,
+                    ..
+                } if past_eof => resent.push(Resent::Parity(slice_no, parity_index)),
+                _ => {}
             }
         }
         resent
     });
 
-    slicer(blocks_per_slice)
+    fec_slicer(blocks_per_slice, parity_per_slice)
         .run(Cursor::new(input.to_vec()), outbound, feedback_rx)
         .await
         .expect("run");
 
     collecting.await.expect("collect")
+}
+
+async fn resent_blocks(
+    input: &[u8],
+    blocks_per_slice: u16,
+    requests: Vec<Feedback>,
+) -> Vec<(u32, u16)> {
+    resent_shards(input, blocks_per_slice, 0, requests)
+        .await
+        .into_iter()
+        .map(|shard| match shard {
+            Resent::Block(slice_no, block_in_slice) => (slice_no, block_in_slice),
+            Resent::Parity(slice_no, parity_index) => (slice_no, parity_index),
+        })
+        .collect()
 }
 
 fn totals(messages: &[Outbound]) -> (u64, u64) {
@@ -97,9 +138,53 @@ fn coordinates(messages: &[Outbound]) -> Vec<(u32, u16)> {
                 block_in_slice,
                 ..
             } => Some((*slice_no, *block_in_slice)),
-            Outbound::Eof { .. } => None,
+            Outbound::Parity { .. } | Outbound::Eof { .. } => None,
         })
         .collect()
+}
+
+fn parity(messages: &[Outbound]) -> Vec<(u32, u16)> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Outbound::Parity {
+                slice_no,
+                parity_index,
+                ..
+            } => Some((*slice_no, *parity_index)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn block_floor(messages: &[Outbound], slice: u32, block: u16) -> u32 {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            Outbound::Block {
+                slice_no,
+                block_in_slice,
+                emit_floor,
+                ..
+            } if *slice_no == slice && *block_in_slice == block => Some(*emit_floor),
+            _ => None,
+        })
+        .expect("block present")
+}
+
+fn parity_floor(messages: &[Outbound], slice: u32, index: u16) -> u32 {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            Outbound::Parity {
+                slice_no,
+                parity_index,
+                emit_floor,
+                ..
+            } if *slice_no == slice && *parity_index == index => Some(*emit_floor),
+            _ => None,
+        })
+        .expect("parity present")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -203,4 +288,43 @@ async fn a_slice_nobody_needs_is_no_longer_resent() {
     .await;
 
     assert!(resent.is_empty(), "{resent:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queues_a_parity_shard_per_configured_shard_after_a_slice() {
+    let messages = fec_run(&vec![7u8; 2 * BLOCK_SIZE], 2, 3).await;
+
+    assert_eq!(parity(&messages), vec![(0, 0), (0, 1), (0, 2)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_parity_transfer_queues_no_parity() {
+    let messages = fec_run(&vec![7u8; 2 * BLOCK_SIZE], 2, 0).await;
+
+    assert!(parity(&messages).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_emit_floor_advances_only_after_a_slices_parity() {
+    let messages = fec_run(&vec![7u8; 3 * BLOCK_SIZE], 2, 1).await;
+
+    assert_eq!(block_floor(&messages, 0, 1), 0);
+    assert_eq!(parity_floor(&messages, 0, 0), 0);
+    assert_eq!(block_floor(&messages, 1, 0), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resends_a_parity_shard_by_its_slot() {
+    let resent = resent_shards(
+        &vec![7u8; 2 * BLOCK_SIZE],
+        2,
+        2,
+        vec![Feedback::Resend {
+            slice_no: 0,
+            blocks: vec![3, 0],
+        }],
+    )
+    .await;
+
+    assert_eq!(resent, vec![Resent::Parity(0, 1), Resent::Block(0, 0)]);
 }

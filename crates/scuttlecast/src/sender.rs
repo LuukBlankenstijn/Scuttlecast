@@ -6,7 +6,7 @@ use std::{
 };
 
 use bon::Builder;
-use proto::{Data, Done, Evicted, Hello, Message};
+use proto::{Data, Done, Evicted, Hello, Message, Parity};
 use tokio::{
     io::AsyncRead,
     sync::{mpsc, watch},
@@ -31,6 +31,7 @@ mod slicer;
 
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
 const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
+const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
 #[derive(Builder)]
 pub struct Sender {
@@ -45,6 +46,8 @@ pub struct Sender {
     blocks_per_slice: NonZeroU16,
     #[builder(default = DEFAULT_MAX_LIVE_SLICES)]
     max_live_slices: NonZeroU16,
+    #[builder(default = DEFAULT_PARITY_PER_SLICE)]
+    parity_per_slice: u16,
     /// Blocks per second the sender will not exceed even when nothing is lost
     max_rate: Option<f64>,
     #[builder(default = watch::channel(TransferState::default()).0)]
@@ -90,7 +93,11 @@ impl Sender {
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel::<Feedback>();
         let max_live_slices =
             NonZeroUsize::new(self.max_live_slices.get() as usize).expect("nonzero");
-        let slicer = Slicer::new(self.blocks_per_slice, max_live_slices);
+        let slicer = Slicer::new(
+            self.blocks_per_slice,
+            self.parity_per_slice,
+            max_live_slices,
+        )?;
         let slicer_task = tokio::spawn(slicer.run(reader, outbound_tx, feedback_rx));
 
         let mut seq: u64 = 0;
@@ -102,6 +109,7 @@ impl Sender {
         let mut pacer = Pacer::new();
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         let mut blocks_sent = 0u64;
+        let mut blocks_at_last_tick = 0u64;
         let mut slices_emitted = 0u32;
         let mut source_wait = Duration::ZERO;
 
@@ -139,6 +147,21 @@ impl Sender {
                         slices_emitted = slices_emitted.max(emit_floor);
                         group.on_emitted(emit_floor);
                     }
+                    Some(Outbound::Parity { slice_no, parity_index, emit_floor, payload }) => {
+                        source_wait += waited_since.elapsed();
+                        pacer.consume();
+                        self.socket.send_to_group(Message::Parity(Parity {
+                            transfer_id,
+                            seq,
+                            slice_no,
+                            parity_index,
+                            emit_floor,
+                            payload: payload.into(),
+                        })).await?;
+                        seq += 1;
+                        slices_emitted = slices_emitted.max(emit_floor);
+                        group.on_emitted(emit_floor);
+                    }
                     Some(Outbound::Eof { total_bytes: bytes, total_blocks: blocks }) => {
                         total_bytes = bytes;
                         total_blocks = blocks;
@@ -159,7 +182,8 @@ impl Sender {
                 _ = tokio::time::sleep(until_credit), if !has_credit => {}
 
                 _ = tick.tick() => {
-                    rate_controller.tick(pacer.take_starvation());
+                    let starved = pacer.take_starvation();
+                    rate_controller.tick(starved);
                     let now = std::time::Instant::now();
                     for (target, stuck_at) in group.reap_silent(now, LIVENESS_TIMEOUT) {
                         let reason = format!(
@@ -180,11 +204,15 @@ impl Sender {
                         })).await?;
                     }
 
+                    let sent_this_tick = blocks_sent - blocks_at_last_tick;
+                    blocks_at_last_tick = blocks_sent;
                     let limiting = self
                         .bottleneck(
                             &group,
                             &rate_controller,
                             std::mem::take(&mut source_wait),
+                            sent_this_tick,
+                            !starved,
                             draining,
                         )
                         .attribute();
@@ -250,6 +278,8 @@ impl Sender {
         group: &Group,
         rate_controller: &RateController,
         source_wait: Duration,
+        sent_this_tick: u64,
+        credit_unused: bool,
         draining: bool,
     ) -> Bottleneck {
         Bottleneck {
@@ -259,6 +289,9 @@ impl Sender {
             max_live_slices: self.max_live_slices.get() as u32,
             at_ceiling: rate_controller.at_ceiling(),
             source_wait: source_wait.max(TICK_INTERVAL / 2) - TICK_INTERVAL / 2,
+            allowed_rate: rate_controller.rate(),
+            achieved_rate: sent_this_tick as f64 / TICK_INTERVAL.as_secs_f64(),
+            credit_unused,
             draining,
         }
     }
@@ -276,7 +309,7 @@ impl Sender {
                         .send_to_group(Message::Hello(Hello {
                             transfer_id,
                             blocks_per_slice: self.blocks_per_slice,
-                            parity_per_slice: 0,
+                            parity_per_slice: self.parity_per_slice,
                             max_live_slices: self.max_live_slices,
                         }))
                         .await?
