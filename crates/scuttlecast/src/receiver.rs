@@ -17,7 +17,7 @@ use crate::{
     RENAK_INTERVAL, SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     receiver::{assembler::Assembler, naks::Naks},
-    transport::MessageSocket,
+    transport::{Losing, MessageSocket},
 };
 
 mod assembler;
@@ -76,6 +76,13 @@ impl Transfer {
 }
 
 impl Receiver {
+    /// Applies a loss rule to this receiver's socket, so a test can decide
+    /// exactly which datagrams it never sees
+    pub fn losing(mut self, losing: Losing) -> Self {
+        self.socket = self.socket.losing(losing);
+        self
+    }
+
     pub async fn recv_file(self, path: PathBuf) -> Result<TransferSummary, ProtoError> {
         let file = tokio::fs::File::create(path)
             .await

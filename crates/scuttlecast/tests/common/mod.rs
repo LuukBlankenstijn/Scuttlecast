@@ -64,6 +64,21 @@ pub fn sender_with(
         .build()
 }
 
+pub fn sender_windowed(
+    group_ip: Ipv4Addr,
+    port: u16,
+    min_receivers: usize,
+    max_live_slices: u16,
+) -> Sender {
+    Sender::builder()
+        .socket(LOCAL, group_ip, port)
+        .expect("bind sender")
+        .min_receivers(min_receivers)
+        .max_wait(MAX_WAIT)
+        .max_live_slices(std::num::NonZeroU16::new(max_live_slices).expect("nonzero window"))
+        .build()
+}
+
 pub struct Output {
     dir: TempDir,
 }

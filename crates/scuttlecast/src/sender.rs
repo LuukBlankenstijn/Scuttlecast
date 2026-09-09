@@ -17,7 +17,7 @@ use crate::{
     sender::pacer::{Pacer, RateController, TICK_INTERVAL},
     sender::slicer::Slicer,
     sender::slicer::channel::{Feedback, Outbound},
-    transport::MessageSocket,
+    transport::{Losing, MessageSocket},
 };
 
 mod group;
@@ -43,6 +43,13 @@ pub struct Sender {
 }
 
 impl Sender {
+    /// Applies a loss rule to this sender's socket, so a test can decide
+    /// exactly which replies it never sees
+    pub fn losing(mut self, losing: Losing) -> Self {
+        self.socket = self.socket.losing(losing);
+        self
+    }
+
     pub async fn send_file(&self, path: PathBuf) -> Result<(), ProtoError> {
         let stream = tokio::fs::File::open(path)
             .await

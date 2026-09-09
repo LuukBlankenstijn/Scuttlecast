@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::Arc;
 
 use proto::Message;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -9,6 +10,7 @@ use crate::error::ProtoError;
 pub struct MessageSocket {
     socket: UdpSocket,
     group_address: SocketAddr,
+    losing: Losing,
 }
 
 impl MessageSocket {
@@ -23,6 +25,7 @@ impl MessageSocket {
         Ok(Self {
             socket: tokio_socket,
             group_address: (group_ip, port + 1).into(),
+            losing: Losing::default(),
         })
     }
 
@@ -43,13 +46,27 @@ impl MessageSocket {
         Ok(Self {
             socket: tokio_socket,
             group_address: (group_ip, port + 1).into(),
+            losing: Losing::default(),
         })
     }
 
+    /// Discards datagrams the loss rule rejects, which is how tests reproduce
+    /// a lossy network exactly rather than hoping for one
+    pub fn losing(mut self, losing: Losing) -> Self {
+        self.losing = losing;
+        self
+    }
+
     pub async fn recv_from(&self) -> Result<(Message, SocketAddr), ProtoError> {
-        let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
-        let (len, src) = self.socket.recv_from(&mut buf).await?;
-        Ok((Message::decode(&buf[..len])?, src))
+        loop {
+            let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
+            let (len, src) = self.socket.recv_from(&mut buf).await?;
+            let message = Message::decode(&buf[..len])?;
+
+            if !self.losing.swallows(&message) {
+                return Ok((message, src));
+            }
+        }
     }
 
     /// Returns the first message with equal transfer_id, discards the rest
@@ -75,5 +92,19 @@ impl MessageSocket {
         let bytes = message.encode()?;
         self.socket.send_to(&bytes, self.group_address).await?;
         Ok(())
+    }
+}
+
+/// A rule deciding which arriving datagrams to pretend never arrived
+#[derive(Clone, Default)]
+pub struct Losing(Option<Arc<dyn Fn(&Message) -> bool + Send + Sync>>);
+
+impl Losing {
+    pub fn every(rule: impl Fn(&Message) -> bool + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(rule)))
+    }
+
+    fn swallows(&self, message: &Message) -> bool {
+        self.0.as_ref().is_some_and(|rule| rule(message))
     }
 }
