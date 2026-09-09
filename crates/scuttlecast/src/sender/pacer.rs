@@ -2,9 +2,13 @@ use std::{collections::HashMap, time::Duration};
 
 use tokio::time::Instant;
 
-/// Loss a healthy network does not reach, and that parity covers when it
-/// happens anyway. Below this the rate grows; above it the rate backs off.
-pub const LOSS_THRESHOLD: f64 = 0.02;
+/// Repair demand a healthy transfer stays under: the fraction of
+/// transmissions receivers have to ask for again. Below this the rate grows;
+/// above it the rate backs off.
+pub const REPAIR_THRESHOLD: f64 = 0.005;
+
+/// How much a reduction has to lower demand to count as having helped
+const DEMAND_IMPROVEMENT: f64 = 0.8;
 const K: f64 = 4.0;
 const MIN_FACTOR: f64 = 0.5;
 const GOOD_TICKS_NEEDED: u32 = 3;
@@ -80,6 +84,7 @@ pub struct RateController {
     ceiling: Option<f64>,
     good_ticks: u32,
     slow_start_limit: Option<f64>,
+    demand_when_reduced: Option<f64>,
 }
 
 impl RateController {
@@ -90,6 +95,7 @@ impl RateController {
             ceiling: None,
             good_ticks: 0,
             slow_start_limit: None,
+            demand_when_reduced: None,
         }
     }
 
@@ -102,8 +108,8 @@ impl RateController {
         self.ceiling.is_some_and(|ceiling| self.rate >= ceiling)
     }
 
-    /// The receiver losing the most right now, which is the one the rate
-    /// follows
+    /// The receiver needing the most repair right now, which is the one the
+    /// rate follows
     pub fn worst(&self) -> Option<(u64, f64)> {
         let now = Instant::now();
         self.clients
@@ -113,19 +119,17 @@ impl RateController {
             .map(|(id, client)| (*id, client.ewma))
     }
 
-    pub fn on_report(&mut self, id: u64, blocks_seen: u64, blocks_expected: u64) {
-        if blocks_expected == 0 {
-            return;
-        }
+    /// `demand` is the fraction of transmissions a receiver had to ask for
+    /// again, so loss the parity absorbed never reaches the rate.
+    pub fn on_report(&mut self, id: u64, demand: f64) {
         let now = Instant::now();
-        let loss = 1f64 - blocks_seen as f64 / blocks_expected as f64;
         let entry = self.clients.entry(id).or_insert(ClientLoss {
-            ewma: loss,
+            ewma: demand,
             last_report_at: now,
         });
         let delta = now.duration_since(entry.last_report_at).as_secs_f64();
         let alpha = 1f64 - (-delta / TAU.as_secs_f64()).exp();
-        entry.ewma = alpha * loss + (1f64 - alpha) * entry.ewma;
+        entry.ewma = alpha * demand + (1f64 - alpha) * entry.ewma;
         entry.last_report_at = now;
     }
 
@@ -134,12 +138,16 @@ impl RateController {
             return;
         };
 
-        if worst > LOSS_THRESHOLD {
-            self.good_ticks = 0;
-            self.slow_start_limit = Some(self.rate * self.reduction_factor(worst));
-            self.rate = (self.rate * self.reduction_factor(worst)).max(MIN_RATE);
+        if worst > REPAIR_THRESHOLD {
+            if self.backing_off_helps(worst) {
+                self.good_ticks = 0;
+                self.slow_start_limit = Some(self.rate * self.reduction_factor(worst));
+                self.rate = (self.rate * self.reduction_factor(worst)).max(MIN_RATE);
+            }
+            self.demand_when_reduced = Some(worst);
             return;
         }
+        self.demand_when_reduced = None;
 
         if !rate_limited {
             return;
@@ -169,6 +177,16 @@ impl RateController {
             .filter(|c| now.duration_since(c.last_report_at) < STALENESS_LIMIT)
             .map(|c| c.ewma)
             .reduce(f64::max)
+    }
+
+    /// Reducing the rate only helps when the loss came from sending too fast.
+    /// A link that drops a steady fraction of packets drops the same fraction
+    /// however slowly it is fed, so a reduction that did not lower demand is
+    /// not repeated: otherwise the rate ratchets to the floor and the transfer
+    /// crawls for nothing.
+    fn backing_off_helps(&self, demand: f64) -> bool {
+        self.demand_when_reduced
+            .is_none_or(|before| demand < before * DEMAND_IMPROVEMENT)
     }
 
     fn in_slow_start(&self) -> bool {
@@ -207,7 +225,7 @@ mod tests {
     async fn doubles_every_tick_during_slow_start() {
         let mut controller = RateController::new();
 
-        controller.on_report(1, 100, 100);
+        controller.on_report(1, 0.0);
 
         controller.tick(true);
         assert_eq!(controller.rate(), INITIAL_RATE * SLOW_START_FACTOR);
@@ -223,13 +241,13 @@ mod tests {
     async fn grows_additively_after_a_loss() {
         let mut controller = RateController::new();
 
-        controller.on_report(1, 50, 100);
+        controller.on_report(1, 0.5);
         controller.tick(true);
         let after_loss = controller.rate();
         assert_eq!(after_loss, INITIAL_RATE * MIN_FACTOR);
 
         tokio::time::advance(Duration::from_secs(5)).await;
-        controller.on_report(1, 100, 100);
+        controller.on_report(1, 0.0);
         ticks(&mut controller, 3);
 
         let expected_step = after_loss * RATE_RECOVERY_FRACTION;
@@ -237,23 +255,42 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn sustained_loss_never_drops_below_the_floor() {
+    async fn demand_that_a_slower_rate_does_not_relieve_is_not_chased_down() {
         let mut controller = RateController::new();
 
         for _ in 0..10 {
-            controller.on_report(1, 50, 100);
+            controller.on_report(1, 0.5);
             controller.tick(true);
             tokio::time::advance(Duration::from_millis(200)).await;
         }
 
-        assert_eq!(controller.rate(), MIN_RATE);
+        assert_eq!(controller.rate(), INITIAL_RATE * MIN_FACTOR);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn demand_that_falls_as_the_rate_falls_keeps_being_chased_down() {
+        let mut controller = RateController::new();
+        let mut demand = 0.5;
+
+        for _ in 0..4 {
+            controller.on_report(1, demand);
+            controller.tick(true);
+            tokio::time::advance(Duration::from_millis(200)).await;
+            demand /= 4.0;
+        }
+
+        assert!(
+            controller.rate() < INITIAL_RATE * MIN_FACTOR,
+            "rate was {}",
+            controller.rate()
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn holds_the_rate_while_no_reports_are_fresh() {
         let mut controller = RateController::new();
 
-        controller.on_report(1, 0, 100);
+        controller.on_report(1, 1.0);
         controller.tick(true);
         let after_loss = controller.rate();
 
@@ -264,11 +301,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reports_without_expected_blocks_are_ignored() {
+    async fn a_report_asking_for_nothing_leaves_the_rate_growing() {
         let mut controller = RateController::new();
 
-        controller.on_report(1, 0, 0);
-        controller.on_report(1, 100, 100);
+        controller.on_report(1, 0.0);
         controller.tick(true);
 
         assert_eq!(controller.rate(), INITIAL_RATE * SLOW_START_FACTOR);
@@ -328,7 +364,7 @@ mod tests {
         let mut controller = RateController::new();
         let start = controller.rate();
 
-        controller.on_report(1, 100, 100);
+        controller.on_report(1, 0.0);
         for _ in 0..10 {
             controller.tick(false);
         }
@@ -340,7 +376,7 @@ mod tests {
     async fn loss_still_reduces_when_not_rate_limited() {
         let mut controller = RateController::new();
 
-        controller.on_report(1, 50, 100);
+        controller.on_report(1, 0.5);
         controller.tick(false);
 
         assert_eq!(controller.rate(), INITIAL_RATE * MIN_FACTOR);

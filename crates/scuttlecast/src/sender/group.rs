@@ -19,6 +19,9 @@ struct Participant {
     windowed_loss: f64,
     cumulative_loss: f64,
     naks: u64,
+    shards_requested: u64,
+    requested_at_last_window: u64,
+    unrecovered_loss: f64,
     sink_stall_ms: u32,
 }
 
@@ -33,6 +36,9 @@ impl Participant {
             windowed_loss: 0.0,
             cumulative_loss: 0.0,
             naks: 0,
+            shards_requested: 0,
+            requested_at_last_window: 0,
+            unrecovered_loss: 0.0,
             sink_stall_ms: 0,
         }
     }
@@ -114,12 +120,16 @@ impl Group {
         stale
     }
 
-    /// Change in `(received, expected)` since the last report the rate
-    /// controller was told about, or `None` while too little has happened to
-    /// read a rate from. A window holding twenty packets calls one loss five
-    /// percent, which is enough to end slow start on a healthy network, so
-    /// windows accumulate until they can carry a verdict.
-    pub fn report_delta(&mut self, stats: &Stats) -> Option<(u64, u64)> {
+    /// What the last reporting window cost this participant, as the fraction
+    /// of transmissions it had to ask for again. `None` while too little has
+    /// happened to read a rate from: a window holding twenty packets calls one
+    /// drop five percent, which is enough to end slow start on a healthy
+    /// network, so windows accumulate until they can carry a verdict.
+    ///
+    /// Loss the parity already covered costs nothing and is deliberately not
+    /// reported here. Backing off because of it would slow a transfer that was
+    /// arriving intact.
+    pub fn repair_demand(&mut self, stats: &Stats) -> Option<f64> {
         let participant = self.participants.get_mut(&stats.receiver_id)?;
         let current = (stats.total_received, stats.total_expected);
         participant.sink_stall_ms = stats.sink_stall_ms;
@@ -129,21 +139,25 @@ impl Group {
 
         let Some((seen, expected)) = participant.last_report else {
             participant.last_report = Some(current);
+            participant.requested_at_last_window = participant.shards_requested;
             return None;
         };
         if current.1 <= expected || current.0 < seen {
             return None;
         }
 
-        let delta = (current.0 - seen, current.1 - expected);
-        if delta.1 < MIN_LOSS_SAMPLE {
+        let transmissions = current.1 - expected;
+        if transmissions < MIN_LOSS_SAMPLE {
             return None;
         }
 
+        let requested = participant.shards_requested - participant.requested_at_last_window;
         participant.last_report = Some(current);
-        participant.windowed_loss = 1.0 - delta.0 as f64 / delta.1 as f64;
+        participant.requested_at_last_window = participant.shards_requested;
+        participant.windowed_loss = 1.0 - (current.0 - seen) as f64 / transmissions as f64;
+        participant.unrecovered_loss = (requested as f64 / transmissions as f64).min(1.0);
 
-        Some(delta)
+        Some(participant.unrecovered_loss)
     }
 
     /// A snapshot of every participant for reporting, slowest last
@@ -155,6 +169,7 @@ impl Group {
                 receiver_id: *receiver_id,
                 address: participant.address,
                 windowed_loss: participant.windowed_loss,
+                unrecovered_loss: participant.unrecovered_loss,
                 lifetime_loss: participant.cumulative_loss,
                 next_needed_slice: participant.next_needed,
                 slices_behind: self.slices_behind(participant),
@@ -210,6 +225,7 @@ impl Group {
         }
         if let Some(participant) = self.participants.get_mut(&nak.receiver_id) {
             participant.naks += 1;
+            participant.shards_requested += nak.missing.len() as u64;
         }
 
         let mut wanted = Vec::new();
@@ -472,76 +488,82 @@ mod tests {
     fn the_first_report_only_establishes_a_baseline() {
         let mut group = group(&[7]);
 
-        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+        assert_eq!(group.repair_demand(&report(7, 100, 100)), None);
     }
 
     #[test]
-    fn successive_reports_yield_the_windowed_delta() {
+    fn loss_the_parity_covered_asks_for_nothing_and_costs_nothing() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 100, 100));
+        group.repair_demand(&report(7, 0, 0));
 
-        assert_eq!(
-            group.report_delta(&report(7, 1090, 1100)),
-            Some((990, 1000))
-        );
+        assert_eq!(group.repair_demand(&report(7, 900, 1000)), Some(0.0));
     }
 
     #[test]
-    fn a_repeated_identical_report_yields_no_delta() {
+    fn demand_is_the_share_of_transmissions_asked_for_again() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 100, 100));
+        group.repair_demand(&report(7, 0, 0));
+        group.on_nak(&nak(7, 0, (0..10).collect()), Instant::now());
 
-        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+        assert_eq!(group.repair_demand(&report(7, 900, 1000)), Some(0.01));
     }
 
     #[test]
-    fn a_report_that_went_backwards_yields_no_delta() {
+    fn demand_only_counts_requests_made_since_the_last_window() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 190, 200));
+        group.repair_demand(&report(7, 0, 0));
+        group.on_nak(&nak(7, 0, (0..10).collect()), Instant::now());
+        group.repair_demand(&report(7, 1000, 1000));
 
-        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+        assert_eq!(group.repair_demand(&report(7, 2000, 2000)), Some(0.0));
     }
 
     #[test]
-    fn a_backward_report_does_not_move_the_baseline() {
+    fn a_repeated_identical_report_yields_no_demand() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 190, 200));
-        group.report_delta(&report(7, 100, 100));
+        group.repair_demand(&report(7, 100, 100));
 
-        assert_eq!(
-            group.report_delta(&report(7, 1190, 1200)),
-            Some((1000, 1000))
-        );
+        assert_eq!(group.repair_demand(&report(7, 100, 100)), None);
     }
 
     #[test]
-    fn a_window_too_small_to_read_a_rate_from_yields_no_delta() {
+    fn a_report_that_went_backwards_yields_no_demand() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 0, 0));
+        group.repair_demand(&report(7, 190, 200));
 
-        assert_eq!(group.report_delta(&report(7, 19, 20)), None);
+        assert_eq!(group.repair_demand(&report(7, 100, 100)), None);
+    }
+
+    #[test]
+    fn a_window_too_small_to_read_a_rate_from_yields_no_demand() {
+        let mut group = group(&[7]);
+        group.repair_demand(&report(7, 0, 0));
+
+        assert_eq!(group.repair_demand(&report(7, 19, 20)), None);
     }
 
     #[test]
     fn windows_too_small_on_their_own_accumulate_into_one() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 0, 0));
+        group.repair_demand(&report(7, 0, 0));
 
-        assert_eq!(group.report_delta(&report(7, 95, 100)), None);
-        assert_eq!(group.report_delta(&report(7, 190, 200)), Some((190, 200)));
+        assert_eq!(group.repair_demand(&report(7, 95, 100)), None);
+        assert_eq!(group.repair_demand(&report(7, 190, 200)), Some(0.0));
     }
 
     #[test]
-    fn the_reported_rows_carry_both_loss_measures() {
+    fn the_reported_rows_separate_wire_loss_from_repair_demand() {
         let mut group = group(&[7]);
-        group.report_delta(&report(7, 0, 0));
-        group.report_delta(&report(7, 150, 200));
-        group.report_delta(&report(7, 250, 400));
+        group.repair_demand(&report(7, 0, 0));
+        group.on_nak(&nak(7, 0, vec![0, 1]), Instant::now());
+        group.repair_demand(&report(7, 150, 200));
+        group.repair_demand(&report(7, 250, 400));
 
         let row = &group.rows()[0];
 
         assert_eq!(row.lifetime_loss, 1.0 - 250.0 / 400.0);
         assert_eq!(row.windowed_loss, 0.5);
+        assert_eq!(row.unrecovered_loss, 0.0);
     }
 
     #[test]

@@ -9,9 +9,11 @@ pub enum LimitingFactor {
     #[default]
     Unconstrained,
     AtConfiguredMax,
+    /// A receiver is asking for repairs, which is loss the parity could not
+    /// absorb, so the rate is following it down
     RateLimited {
         worst: u64,
-        loss: f64,
+        demand: f64,
     },
     WindowStalled {
         blocked_by: u64,
@@ -33,9 +35,11 @@ impl std::fmt::Display for LimitingFactor {
         match self {
             Self::Unconstrained => write!(f, "unconstrained"),
             Self::AtConfiguredMax => write!(f, "at configured maximum"),
-            Self::RateLimited { worst, loss } => {
-                write!(f, "rate limited by {worst} losing {:.2}%", loss * 100.0)
-            }
+            Self::RateLimited { worst, demand } => write!(
+                f,
+                "rate limited by {worst}, needing repair for {:.2}% of what it was sent",
+                demand * 100.0
+            ),
             Self::WindowStalled {
                 blocked_by,
                 slices_behind,
@@ -59,8 +63,10 @@ pub struct Bottleneck {
     /// The participant with the lowest progress, and how far behind it is
     pub slowest: Option<(u64, u32)>,
     /// The participant losing the most, and its recent loss
-    pub worst_loss: Option<(u64, f64)>,
-    pub loss_threshold: f64,
+    /// The participant asking for the most repair, and how much of what it
+    /// was sent it had to ask for again
+    pub worst_demand: Option<(u64, f64)>,
+    pub demand_threshold: f64,
     pub max_live_slices: u32,
     pub at_ceiling: bool,
     /// Time spent with sending credit but nothing to send
@@ -91,10 +97,10 @@ impl Bottleneck {
             };
         }
 
-        if let Some((worst, loss)) = self.worst_loss
-            && loss > self.loss_threshold
+        if let Some((worst, demand)) = self.worst_demand
+            && demand > self.demand_threshold
         {
-            return LimitingFactor::RateLimited { worst, loss };
+            return LimitingFactor::RateLimited { worst, demand };
         }
 
         if !self.draining && !self.source_wait.is_zero() {
@@ -124,6 +130,9 @@ pub struct ReceiverState {
     pub address: SocketAddr,
     /// Loss over the last reporting window, which is what drives the rate
     pub windowed_loss: f64,
+    /// The fraction of transmissions this receiver had to ask for again, which
+    /// is what the rate follows
+    pub unrecovered_loss: f64,
     /// Loss over the whole transfer so far
     pub lifetime_loss: f64,
     pub next_needed_slice: u32,
@@ -165,8 +174,8 @@ mod tests {
     fn healthy() -> Bottleneck {
         Bottleneck {
             slowest: Some((7, 3)),
-            worst_loss: Some((7, 0.0)),
-            loss_threshold: 0.005,
+            worst_demand: Some((7, 0.0)),
+            demand_threshold: 0.005,
             max_live_slices: 512,
             at_ceiling: false,
             source_wait: Duration::ZERO,
@@ -241,7 +250,7 @@ mod tests {
     #[test]
     fn loss_past_the_threshold_names_the_worst_receiver() {
         let bottleneck = Bottleneck {
-            worst_loss: Some((8, 0.2)),
+            worst_demand: Some((8, 0.2)),
             ..healthy()
         };
 
@@ -249,7 +258,7 @@ mod tests {
             bottleneck.attribute(),
             LimitingFactor::RateLimited {
                 worst: 8,
-                loss: 0.2
+                demand: 0.2
             }
         );
     }
@@ -257,7 +266,7 @@ mod tests {
     #[test]
     fn loss_below_the_threshold_is_not_the_limit() {
         let bottleneck = Bottleneck {
-            worst_loss: Some((8, 0.001)),
+            worst_demand: Some((8, 0.001)),
             ..healthy()
         };
 
@@ -268,7 +277,7 @@ mod tests {
     fn a_stalled_window_outranks_loss() {
         let bottleneck = Bottleneck {
             slowest: Some((7, 600)),
-            worst_loss: Some((8, 0.2)),
+            worst_demand: Some((8, 0.2)),
             ..healthy()
         };
 

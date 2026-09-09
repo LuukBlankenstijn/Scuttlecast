@@ -92,7 +92,9 @@ done
 
 echo
 echo "${megabytes}MiB to $receivers receivers in ${elapsed_ms}ms"
-sed -n 's/.*\(limited_by=.*\)/  last attribution: \1/p' "$work/send.log" | tail -1
+sed -n 's/.*limited_by=\(.*\)/\1/p' "$work/send.log" |
+    sed 's/,.*//' | sort | uniq -c | sort -rn |
+    awk '{ ticks = $1; $1 = ""; printf "  %3d ticks:%s\n", ticks, $0 }'
 
 if [[ $status != 0 ]]; then
     echo "FAILED; logs in $work" >&2

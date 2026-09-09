@@ -18,7 +18,7 @@ use crate::{
     LIVENESS_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
-    sender::pacer::{LOSS_THRESHOLD, Pacer, RateController, TICK_INTERVAL},
+    sender::pacer::{Pacer, REPAIR_THRESHOLD, RateController, TICK_INTERVAL},
     sender::slicer::Slicer,
     sender::slicer::channel::{Feedback, Outbound},
     state::{Bottleneck, TransferState},
@@ -246,8 +246,8 @@ impl Sender {
                             if let Some(needed_from) = group.on_stats(&stats) {
                                 let _ = feedback_tx.send(Feedback::Needed(needed_from));
                             }
-                            if let Some((seen, expected)) = group.report_delta(&stats) {
-                                rate_controller.on_report(stats.receiver_id, seen, expected);
+                            if let Some(demand) = group.repair_demand(&stats) {
+                                rate_controller.on_report(stats.receiver_id, demand);
                             }
                         }
                         Message::Nak(nak) => {
@@ -284,8 +284,8 @@ impl Sender {
     ) -> Bottleneck {
         Bottleneck {
             slowest: group.slowest_participant(),
-            worst_loss: rate_controller.worst(),
-            loss_threshold: LOSS_THRESHOLD,
+            worst_demand: rate_controller.worst(),
+            demand_threshold: REPAIR_THRESHOLD,
             max_live_slices: self.max_live_slices.get() as u32,
             at_ceiling: rate_controller.at_ceiling(),
             source_wait: source_wait.max(TICK_INTERVAL / 2) - TICK_INTERVAL / 2,
