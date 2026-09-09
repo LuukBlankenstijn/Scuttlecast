@@ -31,6 +31,12 @@ mod slicer;
 
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
 const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
+
+/// Loss arrives in bursts, so parity covers this multiple of the blocks the
+/// reported loss rate would take out of an average slice. Below two, a slice
+/// unlucky enough to lose twice its share needs a repair anyway and the shards
+/// bought nothing.
+const PARITY_HEADROOM: f64 = 2.0;
 const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
 /// Blocks taken from the slicer per pass through the send loop. Each pass
@@ -109,6 +115,7 @@ impl Sender {
         let mut total_bytes = 0u64;
         let mut total_blocks = 0u64;
         let mut draining = false;
+        let mut covering = self.parity_per_slice;
         let mut drain_deadline: Option<Instant> = None;
         let mut rate_controller = RateController::new().capped_at(self.max_rate);
         let mut pacer = Pacer::new();
@@ -221,6 +228,17 @@ impl Sender {
                     if sent_this_tick == 0 && !draining {
                         self.socket.send_to_group(self.hello(transfer_id)).await?;
                     }
+
+                    let wanted = parity_for(
+                        group.worst_loss(),
+                        self.blocks_per_slice,
+                        self.parity_per_slice,
+                    );
+                    if wanted != covering {
+                        covering = wanted;
+                        let _ = feedback_tx.send(Feedback::Cover(wanted));
+                    }
+
                     let limiting = self
                         .bottleneck(
                             &group,
@@ -236,6 +254,7 @@ impl Sender {
                         blocks_per_second: rate_controller.rate(),
                         blocks_sent,
                         slices_emitted,
+                        parity_shards: covering,
                         total_blocks: draining.then_some(total_blocks),
                         draining,
                         limiting,
@@ -348,5 +367,68 @@ impl Sender {
             }
         }
         Ok(group)
+    }
+}
+
+/// Parity shards that cover the loss the worst receiver reports. Loss arrives
+/// in bursts rather than spread evenly over a slice, so the shards have to
+/// cover a multiple of the average rather than the average itself. A clean
+/// link asks for none, which costs nothing to send and nothing to encode.
+///
+/// A transfer too short for any receiver to have measured a loss rate keeps
+/// the full width it was configured with: the alternative is dropping cover
+/// on the strength of a number nobody has reported, and a short transfer that
+/// loses a block then pays a round trip for it.
+fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u16) -> u16 {
+    let Some(loss) = loss else {
+        return max_parity;
+    };
+
+    let shards = loss * blocks_per_slice.get() as f64 * PARITY_HEADROOM;
+    (shards.ceil() as u16).min(max_parity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parity_for;
+    use std::num::NonZeroU16;
+
+    fn blocks(count: u16) -> NonZeroU16 {
+        NonZeroU16::new(count).expect("nonzero")
+    }
+
+    #[test]
+    fn a_transfer_too_short_to_measure_keeps_its_full_width() {
+        assert_eq!(parity_for(None, blocks(32), 8), 8);
+        assert_eq!(parity_for(None, blocks(32), 0), 0);
+    }
+
+    #[test]
+    fn a_clean_link_carries_no_parity() {
+        assert_eq!(parity_for(Some(0.0), blocks(32), 8), 0);
+    }
+
+    #[test]
+    fn a_single_lost_block_in_a_slice_is_worth_a_shard() {
+        assert_eq!(parity_for(Some(1.0 / 32.0), blocks(32), 8), 2);
+    }
+
+    #[test]
+    fn coverage_grows_with_the_loss_it_has_to_absorb() {
+        assert_eq!(parity_for(Some(0.01), blocks(32), 8), 1);
+        assert_eq!(parity_for(Some(0.05), blocks(32), 8), 4);
+        assert_eq!(parity_for(Some(0.10), blocks(32), 8), 7);
+    }
+
+    #[test]
+    fn loss_past_what_the_transfer_allows_for_is_capped() {
+        assert_eq!(parity_for(Some(0.5), blocks(32), 8), 8);
+        assert_eq!(parity_for(Some(1.0), blocks(32), 0), 0);
+    }
+
+    #[test]
+    fn wider_slices_need_more_shards_for_the_same_loss() {
+        assert_eq!(parity_for(Some(0.02), blocks(32), 16), 2);
+        assert_eq!(parity_for(Some(0.02), blocks(128), 16), 6);
     }
 }

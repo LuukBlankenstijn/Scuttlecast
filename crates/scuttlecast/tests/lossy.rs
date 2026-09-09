@@ -82,6 +82,36 @@ async fn transfer_with_loss(
     received
 }
 
+/// Runs a transfer and reports every parity count the sender published while
+/// it ran, so a test can see the coverage follow the link.
+async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Losing) -> Vec<u16> {
+    let group = common::group(group_id);
+    let output = common::Output::new();
+    let path = output.path("receiver.bin");
+
+    let receiver = common::receiver(group, port).losing(losing);
+    let receiving = tokio::spawn(async move { receiver.recv_file(path).await });
+
+    let sender = common::sender(group, port, 1);
+    let mut progress = sender.progress();
+    let watching = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        while progress.changed().await.is_ok() {
+            seen.push(progress.borrow_and_update().parity_shards);
+        }
+        seen
+    });
+
+    sender
+        .send_stream(common::source(bytes))
+        .await
+        .expect("send");
+    receiving.await.expect("join").expect("receive");
+    drop(sender);
+
+    watching.await.expect("watch")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repairs_a_receiver_losing_a_fifth_of_the_blocks() {
     let sent = common::payload(3 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
@@ -221,4 +251,35 @@ async fn recovers_from_parity_without_asking_for_anything() {
         assert!(summary.loss() > 0.0, "nothing was lost: {summary:?}");
         assert_eq!(std::fs::read(&path).expect("read output"), sent);
     }
+}
+
+/// Parity costs a quarter of the wire at its default width, so a link that
+/// never drops anything should stop paying for it. The transfer has to run
+/// long enough for a receiver to report a loss rate at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clean_link_stops_carrying_parity() {
+    let sent = common::payload(600 * BLOCK_SIZE);
+
+    let observed = parity_over_transfer(56, 50080, &sent, Losing::default()).await;
+
+    assert_eq!(
+        observed.last().copied(),
+        Some(0),
+        "coverage never fell away: {observed:?}"
+    );
+}
+
+/// The reverse: a receiver dropping a tenth of the blocks needs shards, and
+/// the sender only learns that from what the receiver reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lossy_link_keeps_carrying_parity() {
+    let sent = common::payload(600 * BLOCK_SIZE);
+
+    let observed = parity_over_transfer(57, 50090, &sent, every_nth_block(10, 3)).await;
+
+    let settled = observed.last().copied().expect("a published count");
+    assert!(
+        settled >= 4,
+        "a tenth of the blocks lost should hold coverage up: {observed:?}"
+    );
 }

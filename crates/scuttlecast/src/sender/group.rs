@@ -16,7 +16,7 @@ struct Participant {
     reached_end: bool,
     last_seen: Option<Instant>,
     last_report: Option<(u64, u64)>,
-    windowed_loss: f64,
+    windowed_loss: Option<f64>,
     cumulative_loss: f64,
     naks: u64,
     shards_requested: u64,
@@ -33,7 +33,7 @@ impl Participant {
             reached_end: false,
             last_seen: None,
             last_report: None,
-            windowed_loss: 0.0,
+            windowed_loss: None,
             cumulative_loss: 0.0,
             naks: 0,
             shards_requested: 0,
@@ -154,7 +154,7 @@ impl Group {
         let requested = participant.shards_requested - participant.requested_at_last_window;
         participant.last_report = Some(current);
         participant.requested_at_last_window = participant.shards_requested;
-        participant.windowed_loss = 1.0 - (current.0 - seen) as f64 / transmissions as f64;
+        participant.windowed_loss = Some(1.0 - (current.0 - seen) as f64 / transmissions as f64);
         participant.unrecovered_loss = (requested as f64 / transmissions as f64).min(1.0);
 
         Some(participant.unrecovered_loss)
@@ -168,7 +168,7 @@ impl Group {
             .map(|(receiver_id, participant)| ReceiverState {
                 receiver_id: *receiver_id,
                 address: participant.address,
-                windowed_loss: participant.windowed_loss,
+                windowed_loss: participant.windowed_loss.unwrap_or(0.0),
                 unrecovered_loss: participant.unrecovered_loss,
                 lifetime_loss: participant.cumulative_loss,
                 next_needed_slice: participant.next_needed,
@@ -188,6 +188,18 @@ impl Group {
             .iter()
             .min_by_key(|(_, participant)| participant.next_needed)
             .map(|(receiver_id, participant)| (*receiver_id, self.slices_behind(participant)))
+    }
+
+    /// The wire loss the worst-placed receiver is seeing, once a window has
+    /// carried enough transmissions to mean anything. One parity stream serves
+    /// the whole group, so it has to cover the receiver losing most. This is
+    /// loss before any repair, so parity absorbing it does not hide the reason
+    /// the parity is there.
+    pub fn worst_loss(&self) -> Option<f64> {
+        self.participants
+            .values()
+            .filter_map(|participant| participant.windowed_loss)
+            .reduce(f64::max)
     }
 
     fn slices_behind(&self, participant: &Participant) -> u32 {

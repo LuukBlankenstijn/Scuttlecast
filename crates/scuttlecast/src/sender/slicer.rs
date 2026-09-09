@@ -66,6 +66,7 @@ impl Slicer {
 
                 message = feedback.recv() => match message {
                     Some(Feedback::Needed(first_needed)) => self.window.retain_from(first_needed),
+                    Some(Feedback::Cover(parity)) => self.window.cover(parity)?,
                     Some(Feedback::Resend { slice_no, blocks }) => {
                         self.resend(slice_no, &blocks, &outbound).await?
                     }

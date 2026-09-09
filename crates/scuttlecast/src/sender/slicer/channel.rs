@@ -28,6 +28,8 @@ pub enum Outbound {
 pub enum Feedback {
     /// The lowest slice any participant still needs
     Needed(u32),
+    /// Parity shards the next sealed slices should carry
+    Cover(u16),
     Resend {
         slice_no: u32,
         blocks: Vec<u16>,

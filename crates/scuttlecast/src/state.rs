@@ -147,6 +147,9 @@ pub struct TransferState {
     pub blocks_per_second: f64,
     pub blocks_sent: u64,
     pub slices_emitted: u32,
+    /// Parity shards each slice now carries, which follows the loss the worst
+    /// receiver reports and costs nothing on a clean link
+    pub parity_shards: u16,
     pub total_blocks: Option<u64>,
     pub draining: bool,
     pub limiting: LimitingFactor,

@@ -42,7 +42,8 @@ pub(super) struct Pushed {
 
 pub(super) struct Window {
     blocks_per_slice: usize,
-    parity_per_slice: usize,
+    max_parity: usize,
+    parity: usize,
     max_live_slices: usize,
     codec: Option<ReedSolomon>,
     live: VecDeque<Slice>,
@@ -52,28 +53,46 @@ pub(super) struct Window {
 impl Window {
     pub(super) fn new(
         blocks_per_slice: NonZeroU16,
-        parity_per_slice: u16,
+        max_parity: u16,
         max_live_slices: NonZeroUsize,
     ) -> Result<Self, Error> {
         let blocks_per_slice = blocks_per_slice.get() as usize;
-        let parity_per_slice = parity_per_slice as usize;
-        if blocks_per_slice + parity_per_slice > MAX_SHARDS_PER_SLICE {
+        let max_parity = max_parity as usize;
+        if blocks_per_slice + max_parity > MAX_SHARDS_PER_SLICE {
             return Err(Error::TooManyShards);
         }
 
-        let codec = match parity_per_slice {
-            0 => None,
-            parity => Some(ReedSolomon::new(blocks_per_slice, parity)?),
-        };
-
-        Ok(Self {
+        let mut window = Self {
             blocks_per_slice,
-            parity_per_slice,
+            max_parity,
+            parity: 0,
             max_live_slices: max_live_slices.get(),
-            codec,
+            codec: None,
             live: VecDeque::new(),
             current: Slice::empty(0),
-        })
+        };
+        window.cover(max_parity as u16)?;
+
+        Ok(window)
+    }
+
+    /// Sets how many parity shards the slices sealed from now on carry, capped
+    /// by the maximum the transfer announced. Shard `j` comes out the same
+    /// whether two or twenty are asked for, so receivers go on decoding
+    /// against the announced maximum however little the sender is sending.
+    pub(super) fn cover(&mut self, wanted: u16) -> Result<(), Error> {
+        let wanted = (wanted as usize).min(self.max_parity);
+        if wanted == self.parity {
+            return Ok(());
+        }
+
+        self.codec = match wanted {
+            0 => None,
+            parity => Some(ReedSolomon::new(self.blocks_per_slice, parity)?),
+        };
+        self.parity = wanted;
+
+        Ok(())
     }
 
     pub(super) fn is_full(&self) -> bool {
@@ -148,7 +167,7 @@ impl Window {
             return Vec::new();
         };
 
-        let mut parity = vec![vec![0u8; BLOCK_SIZE]; self.parity_per_slice];
+        let mut parity = vec![vec![0u8; BLOCK_SIZE]; self.parity];
         let full = self.current.data.len() == self.blocks_per_slice
             && self
                 .current
@@ -377,5 +396,63 @@ mod tests {
 
         assert!(sealed.parity.is_empty());
         assert_eq!(window.shard(0, 2), None);
+    }
+
+    #[test]
+    fn covering_less_seals_fewer_shards() {
+        let mut window = fec_window(2, 4, 8);
+        window.cover(1).expect("cover");
+
+        window.push(full_block(1));
+        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+
+        assert_eq!(sealed.parity.len(), 1);
+    }
+
+    #[test]
+    fn covering_more_than_the_transfer_announced_is_capped() {
+        let mut window = fec_window(2, 2, 8);
+        window.cover(50).expect("cover");
+
+        window.push(full_block(1));
+        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+
+        assert_eq!(sealed.parity.len(), 2);
+    }
+
+    #[test]
+    fn covering_nothing_stops_parity_without_disturbing_the_slices() {
+        let mut window = fec_window(2, 2, 8);
+        window.cover(0).expect("cover");
+
+        window.push(full_block(1));
+        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+
+        assert!(sealed.parity.is_empty());
+        assert_eq!(window.shard(0, 0), Some(&full_block(1)));
+    }
+
+    /// Receivers decode against the maximum the transfer announced whatever
+    /// the sender is currently sending, which only holds because shard `j` is
+    /// the same either way. A codec that stopped honouring that would corrupt
+    /// every reconstruction rather than fail, so it is worth pinning.
+    #[test]
+    fn a_shard_is_the_same_however_many_were_asked_for() {
+        let mut wide = fec_window(4, 4, 8);
+        let mut narrow = fec_window(4, 4, 8);
+        narrow.cover(1).expect("cover");
+
+        let mut wide_sealed = None;
+        let mut narrow_sealed = None;
+        for byte in 1..=4 {
+            wide_sealed = wide.push(full_block(byte)).sealed;
+            narrow_sealed = narrow.push(full_block(byte)).sealed;
+        }
+
+        let wide = wide_sealed.expect("sealed");
+        let narrow = narrow_sealed.expect("sealed");
+
+        assert_eq!(wide.parity.len(), 4);
+        assert_eq!(narrow.parity, wide.parity[..1]);
     }
 }

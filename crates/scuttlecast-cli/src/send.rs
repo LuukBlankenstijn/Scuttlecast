@@ -76,6 +76,7 @@ async fn report(mut progress: watch::Receiver<TransferState>) {
             rate = format!("{:.1} MiB/s", state.bytes_per_second() / (1024.0 * 1024.0)),
             blocks = state.blocks_sent,
             slices = state.slices_emitted,
+            parity = state.parity_shards,
             draining = state.draining,
             limited_by = %state.limiting,
             "sending"
