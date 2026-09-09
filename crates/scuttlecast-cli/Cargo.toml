@@ -3,6 +3,10 @@ name = "scuttlecast-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "scuttle"
+path = "src/main.rs"
+
 [dependencies]
 scuttlecast.workspace = true
 clap.workspace = true

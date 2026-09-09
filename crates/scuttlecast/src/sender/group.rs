@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use proto::{Nak, Stats};
 
@@ -8,6 +8,10 @@ use crate::HOLDOFF;
 #[derive(Default)]
 struct Participant {
     next_needed: u32,
+    reached_end: bool,
+    last_seen: Option<Instant>,
+    last_report: Option<(u64, u64)>,
+    cumulative_loss: f64,
 }
 
 #[derive(Default)]
@@ -43,31 +47,95 @@ impl Group {
         !self.participants.is_empty()
             && self
                 .participants
-                .keys()
-                .all(|receiver_id| self.is_complete(*receiver_id))
+                .values()
+                .all(|participant| participant.reached_end)
     }
 
-    /// Records how many slices the transfer turned out to have, which is what
-    /// makes a participant's progress readable as completion
+    pub fn complete_count(&self) -> usize {
+        self.participants
+            .values()
+            .filter(|participant| participant.reached_end)
+            .count()
+    }
+
+    pub fn mark_all_seen(&mut self, now: Instant) {
+        for participant in self.participants.values_mut() {
+            participant.last_seen = Some(now);
+        }
+    }
+
+    pub fn mark_seen(&mut self, receiver_id: u64, now: Instant) {
+        if let Some(participant) = self.participants.get_mut(&receiver_id) {
+            participant.last_seen = Some(now);
+        }
+    }
+
+    /// Removes participants silent for longer than `timeout`, returning each
+    /// dropped id with the slice it was stuck at
+    pub fn reap_silent(&mut self, now: Instant, timeout: Duration) -> Vec<(u64, u32)> {
+        let stale: Vec<(u64, u32)> = self
+            .participants
+            .iter()
+            .filter(|(_, participant)| {
+                participant
+                    .last_seen
+                    .is_some_and(|seen| now.duration_since(seen) > timeout)
+            })
+            .map(|(receiver_id, participant)| (*receiver_id, participant.next_needed))
+            .collect();
+        for (receiver_id, _) in &stale {
+            self.participants.remove(receiver_id);
+        }
+        stale
+    }
+
+    /// Windowed change in `(received, expected)` since the participant's last
+    /// report, or `None` for a first, duplicate, or reordered report
+    pub fn report_delta(&mut self, stats: &Stats) -> Option<(u64, u64)> {
+        let participant = self.participants.get_mut(&stats.receiver_id)?;
+        let current = (stats.total_received, stats.total_expected);
+        if current.1 > 0 {
+            participant.cumulative_loss = 1.0 - current.0 as f64 / current.1 as f64;
+        }
+        let delta = participant.last_report.and_then(|(seen, expected)| {
+            (current.1 > expected && current.0 >= seen)
+                .then(|| (current.0 - seen, current.1 - expected))
+        });
+        if participant.last_report.is_none() || delta.is_some() {
+            participant.last_report = Some(current);
+        }
+        delta
+    }
+
+    #[allow(dead_code)]
+    pub fn loss_ratio(&self, receiver_id: u64) -> Option<f64> {
+        self.participants
+            .get(&receiver_id)
+            .map(|participant| participant.cumulative_loss)
+    }
+
+    /// Records how many slices the transfer turned out to have. Progress
+    /// reported before this was known says nothing about completion: a
+    /// receiver cannot finish a transfer whose end it has not heard about, so
+    /// every participant has to confirm again afterwards.
     pub fn on_eof(&mut self, total_slices: u32) {
         self.total_slices = Some(total_slices);
+        for participant in self.participants.values_mut() {
+            participant.reached_end = false;
+        }
     }
 
     /// Returns the lowest slice the group still wants, if that advanced
     pub fn on_stats(&mut self, stats: &Stats) -> Option<u32> {
-        self.participants.get_mut(&stats.receiver_id)?.next_needed = stats.next_needed_slice;
+        let reached_end = self
+            .total_slices
+            .is_some_and(|total_slices| stats.next_needed_slice >= total_slices);
+
+        let participant = self.participants.get_mut(&stats.receiver_id)?;
+        participant.next_needed = stats.next_needed_slice;
+        participant.reached_end = reached_end;
 
         self.advance()
-    }
-
-    fn is_complete(&self, receiver_id: u64) -> bool {
-        let Some(total_slices) = self.total_slices else {
-            return false;
-        };
-
-        self.participants
-            .get(&receiver_id)
-            .is_some_and(|participant| participant.next_needed >= total_slices)
     }
 
     /// Returns the blocks that are worth putting back on the wire
@@ -127,7 +195,7 @@ impl Group {
 mod tests {
     use super::{Group, HOLDOFF};
     use proto::{Nak, Stats};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn group(receiver_ids: &[u64]) -> Group {
         let mut group = Group::default();
@@ -144,6 +212,17 @@ mod tests {
             total_received: 0,
             total_expected: 0,
             next_needed_slice,
+            sink_stall_ms: 0,
+        }
+    }
+
+    fn report(receiver_id: u64, total_received: u64, total_expected: u64) -> Stats {
+        Stats {
+            transfer_id: 1,
+            receiver_id,
+            total_received,
+            total_expected,
+            next_needed_slice: 0,
             sink_stall_ms: 0,
         }
     }
@@ -310,5 +389,80 @@ mod tests {
 
         assert_eq!(group.suppressed.len(), 1);
         assert_eq!(group.on_nak(&nak(7, 4, vec![0]), now), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn the_first_report_only_establishes_a_baseline() {
+        let mut group = group(&[7]);
+
+        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+    }
+
+    #[test]
+    fn successive_reports_yield_the_windowed_delta() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 100, 100));
+
+        assert_eq!(group.report_delta(&report(7, 190, 200)), Some((90, 100)));
+    }
+
+    #[test]
+    fn a_repeated_identical_report_yields_no_delta() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 100, 100));
+
+        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+    }
+
+    #[test]
+    fn a_report_that_went_backwards_yields_no_delta() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 190, 200));
+
+        assert_eq!(group.report_delta(&report(7, 100, 100)), None);
+    }
+
+    #[test]
+    fn a_backward_report_does_not_move_the_baseline() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 190, 200));
+        group.report_delta(&report(7, 100, 100));
+
+        assert_eq!(group.report_delta(&report(7, 290, 300)), Some((100, 100)));
+    }
+
+    #[test]
+    fn the_cumulative_loss_ratio_reflects_the_latest_report() {
+        let mut group = group(&[7]);
+        group.report_delta(&report(7, 150, 200));
+
+        assert_eq!(group.loss_ratio(7), Some(0.25));
+    }
+
+    #[test]
+    fn a_participant_silent_past_the_timeout_is_reaped() {
+        let mut group = group(&[7, 8]);
+        let start = Instant::now();
+        group.mark_all_seen(start);
+        group.on_stats(&stats(7, 5));
+        group.mark_seen(8, start + Duration::from_secs(2));
+
+        let reaped = group.reap_silent(start + Duration::from_secs(3), Duration::from_secs(1));
+
+        assert_eq!(reaped, vec![(7, 5)]);
+        assert!(!group.contains(7));
+        assert!(group.contains(8));
+    }
+
+    #[test]
+    fn a_recently_seen_participant_survives_reaping() {
+        let mut group = group(&[7]);
+        let start = Instant::now();
+        group.mark_all_seen(start);
+
+        let reaped = group.reap_silent(start + Duration::from_millis(500), Duration::from_secs(1));
+
+        assert!(reaped.is_empty());
+        assert!(group.contains(7));
     }
 }

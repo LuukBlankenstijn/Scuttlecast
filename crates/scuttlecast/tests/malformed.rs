@@ -25,7 +25,7 @@ async fn receive_one_transfer(
     port: u16,
 ) -> (
     common::Rogue,
-    tokio::task::JoinHandle<Result<(), ProtoError>>,
+    tokio::task::JoinHandle<Result<scuttlecast::receiver::TransferSummary, ProtoError>>,
     common::Output,
 ) {
     let group = common::group(group_id);

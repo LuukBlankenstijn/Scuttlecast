@@ -23,7 +23,7 @@ async fn both_receivers_get_the_whole_payload() {
     let receiving_second = spawn_receiver(20, 47000, second.clone());
 
     common::sender(common::group(20), 47000, 2)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 
@@ -54,7 +54,7 @@ async fn sender_waits_until_min_receivers_joined() {
 
     let started = Instant::now();
     common::sender(common::group(21), 47010, 2)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
     let waited = started.elapsed();
@@ -78,7 +78,7 @@ async fn sender_proceeds_when_min_receivers_never_arrive() {
     let receiving = spawn_receiver(22, 47020, path.clone());
 
     common::sender_with(common::group(22), 47020, 5, Duration::from_millis(500))
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 
@@ -100,7 +100,7 @@ async fn three_receivers_get_identical_payloads() {
         .collect();
 
     common::sender(common::group(23), 47030, 3)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 

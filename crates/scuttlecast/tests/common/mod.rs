@@ -29,6 +29,10 @@ pub fn payload(len: usize) -> Vec<u8> {
         .collect()
 }
 
+pub fn source(bytes: &[u8]) -> std::io::Cursor<Vec<u8>> {
+    std::io::Cursor::new(bytes.to_vec())
+}
+
 pub fn receiver(group_ip: Ipv4Addr, port: u16) -> Receiver {
     Receiver::builder()
         .socket(LOCAL, group_ip, port)
@@ -88,10 +92,7 @@ pub async fn transfer_to_file(group_id: u8, port: u16, bytes: &[u8]) -> Vec<u8> 
     });
 
     let sender = sender(group_ip, port, 1);
-    sender
-        .send_stream(bytes.to_vec().as_slice())
-        .await
-        .expect("send");
+    sender.send_stream(source(bytes)).await.expect("send");
 
     receiving.await.expect("join").expect("receive");
     std::fs::read(&path).expect("read output")

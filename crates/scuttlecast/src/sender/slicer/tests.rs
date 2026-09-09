@@ -1,6 +1,7 @@
 use super::Slicer;
 use crate::sender::slicer::channel::{Feedback, Outbound};
 use crate::{BLOCK_SIZE, error::ProtoError};
+use std::io::Cursor;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tokio::sync::mpsc;
 
@@ -13,7 +14,7 @@ fn slicer(blocks_per_slice: u16) -> Slicer {
 
 async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
     let (outbound, mut collected) = mpsc::channel(256);
-    let (feedback, feedback_rx) = mpsc::channel(4);
+    let (feedback, feedback_rx) = mpsc::unbounded_channel();
 
     let collecting = tokio::spawn(async move {
         let mut seen = Vec::new();
@@ -21,14 +22,14 @@ async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
             let end_of_input = matches!(message, Outbound::Eof { .. });
             seen.push(message);
             if end_of_input {
-                feedback.send(Feedback::Done).await.expect("done");
+                feedback.send(Feedback::Done).expect("done");
             }
         }
         seen
     });
 
     slicer(blocks_per_slice)
-        .run(input, outbound, feedback_rx)
+        .run(Cursor::new(input.to_vec()), outbound, feedback_rx)
         .await
         .expect("run");
 
@@ -43,7 +44,7 @@ async fn resent_blocks(
     mut requests: Vec<Feedback>,
 ) -> Vec<(u32, u16)> {
     let (outbound, mut collected) = mpsc::channel(256);
-    let (feedback, feedback_rx) = mpsc::channel(8);
+    let (feedback, feedback_rx) = mpsc::unbounded_channel();
 
     let collecting = tokio::spawn(async move {
         let mut resent = Vec::new();
@@ -53,10 +54,10 @@ async fn resent_blocks(
             match message {
                 Outbound::Eof { .. } => {
                     for request in requests.drain(..) {
-                        feedback.send(request).await.expect("request");
+                        feedback.send(request).expect("request");
                     }
                     past_eof = true;
-                    feedback.send(Feedback::Done).await.expect("done");
+                    feedback.send(Feedback::Done).expect("done");
                 }
                 Outbound::Block {
                     slice_no,
@@ -70,7 +71,7 @@ async fn resent_blocks(
     });
 
     slicer(blocks_per_slice)
-        .run(input, outbound, feedback_rx)
+        .run(Cursor::new(input.to_vec()), outbound, feedback_rx)
         .await
         .expect("run");
 
@@ -127,11 +128,11 @@ async fn reports_eof_for_empty_input() {
 #[tokio::test]
 async fn a_closed_egress_stops_the_slicer() {
     let (outbound, collected) = mpsc::channel(4);
-    let (_feedback, feedback_rx) = mpsc::channel::<Feedback>(4);
+    let (_feedback, feedback_rx) = mpsc::unbounded_channel::<Feedback>();
     drop(collected);
 
     let outcome = slicer(2)
-        .run(&vec![7u8; BLOCK_SIZE][..], outbound, feedback_rx)
+        .run(Cursor::new(vec![7u8; BLOCK_SIZE]), outbound, feedback_rx)
         .await;
 
     assert!(
@@ -143,10 +144,12 @@ async fn a_closed_egress_stops_the_slicer() {
 #[tokio::test]
 async fn a_closed_feedback_channel_stops_the_slicer() {
     let (outbound, _collected) = mpsc::channel(256);
-    let (feedback, feedback_rx) = mpsc::channel::<Feedback>(4);
+    let (feedback, feedback_rx) = mpsc::unbounded_channel::<Feedback>();
     drop(feedback);
 
-    let outcome = slicer(2).run(&[][..], outbound, feedback_rx).await;
+    let outcome = slicer(2)
+        .run(Cursor::new(Vec::<u8>::new()), outbound, feedback_rx)
+        .await;
 
     assert!(
         matches!(outcome, Err(ProtoError::EgressClosed)),

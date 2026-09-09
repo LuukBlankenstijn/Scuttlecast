@@ -14,15 +14,30 @@ pub enum ProtoError {
     #[error("invalid address: {0}")]
     AddrParse(#[from] std::net::AddrParseError),
 
-    #[error("expected {expected} bytes, received {received}")]
-    ByteCountMismatch { expected: u64, received: u64 },
-
-    #[error("block {block_no} lies beyond the addressable byte range")]
-    BlockOutOfRange { block_no: u64 },
-
     #[error("Timeout: {0}")]
     Timeout(String),
 
     #[error("the pacer stopped consuming outbound blocks")]
     EgressClosed,
+
+    #[error("the sender went silent with {held} of {total:?} slices written")]
+    SenderSilent { held: u32, total: Option<u32> },
+
+    #[error("expected {expected} bytes, received {received}")]
+    ByteCountMismatch { expected: u64, received: u64 },
+
+    #[error("evicted by the sender: {0}")]
+    Evicted(String),
+
+    #[error("the output stopped accepting blocks")]
+    SinkClosed,
+
+    #[error("{complete} of {participants} receivers completed the transfer")]
+    TransferIncomplete {
+        complete: usize,
+        participants: usize,
+    },
+
+    #[error("no receivers joined the transfer")]
+    NoParticipants,
 }

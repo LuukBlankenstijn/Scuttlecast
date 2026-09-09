@@ -1,16 +1,22 @@
-use std::{net::Ipv4Addr, num::NonZeroU16, path::PathBuf, time::Duration};
+use std::{
+    net::Ipv4Addr,
+    num::{NonZeroU16, NonZeroUsize},
+    path::PathBuf,
+    time::Duration,
+};
 
 use bon::Builder;
-use futures_util::StreamExt;
-use proto::{Data, Done, Hello, Message};
-use tokio::{io::AsyncRead, time::Instant};
-use tracing::debug;
+use proto::{Data, Done, Evicted, Hello, Message};
+use tokio::{io::AsyncRead, sync::mpsc, time::Instant};
+use tracing::{debug, warn};
 
 use crate::{
-    BLOCK_SIZE, STATS_INTERVAL,
+    LIVENESS_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
     sender::pacer::{Pacer, RateController, TICK_INTERVAL},
+    sender::slicer::Slicer,
+    sender::slicer::channel::{Feedback, Outbound},
     transport::MessageSocket,
 };
 
@@ -45,52 +51,113 @@ impl Sender {
         Ok(())
     }
 
-    pub async fn send_stream(&self, reader: impl AsyncRead + Unpin) -> Result<(), ProtoError> {
+    pub async fn send_stream(
+        &self,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+    ) -> Result<(), ProtoError> {
         let transfer_id = rand::random();
 
         let mut group = self.gather_participants(transfer_id).await?;
-        debug!("starting send with {} participants", group.len());
+        if group.len() == 0 {
+            return Err(ProtoError::NoParticipants);
+        }
+        let participants_at_start = group.len();
+        debug!("starting send with {participants_at_start} participants");
+        group.mark_all_seen(std::time::Instant::now());
 
-        let mut block_no = 0;
-        let mut seq = 0;
-        let mut stream = Box::pin(slicer::blocks::split(reader, BLOCK_SIZE));
-        let mut total_bytes = 0;
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Outbound>(64);
+        let (feedback_tx, feedback_rx) = mpsc::unbounded_channel::<Feedback>();
+        let max_live_slices =
+            NonZeroUsize::new(self.max_live_slices.get() as usize).expect("nonzero");
+        let slicer = Slicer::new(self.blocks_per_slice, max_live_slices);
+        let slicer_task = tokio::spawn(slicer.run(reader, outbound_tx, feedback_rx));
+
+        let mut seq: u64 = 0;
+        let mut total_bytes = 0u64;
+        let mut total_blocks = 0u64;
+        let mut draining = false;
+        let mut drain_deadline: Option<Instant> = None;
         let mut rate_controller = RateController::new();
         let mut pacer = Pacer::new();
         let mut tick = tokio::time::interval(TICK_INTERVAL);
-        loop {
+
+        let result = loop {
+            if group.len() == 0 {
+                break Err(ProtoError::NoParticipants);
+            }
+            if draining && group.all_complete() {
+                break Ok(());
+            }
+
             let rate = rate_controller.rate();
             pacer.refill(rate);
             let has_credit = pacer.has_credit();
             let until_credit = pacer.time_until_credit(rate);
+            let drain_left =
+                drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
             tokio::select! {
-                s = stream.next(), if has_credit => {
-                    let Some(block) = s else {
-                        break;
-                    };
-                    pacer.consume();
-
-                    let block = block.map_err(ProtoError::File)?;
-                    total_bytes += block.len() as u64;
-                    let message = Message::Data(Data {
-                        transfer_id,
-                        seq,
-                        slice_no: Data::slice_no(block_no, self.blocks_per_slice),
-                        block_in_slice: Data::block_in_slice(block_no, self.blocks_per_slice),
-                        emit_floor: Data::slice_no(block_no, self.blocks_per_slice),
-                        payload: block.into(),
-                    });
-                    self.socket.send_to_group(message).await?;
-                    block_no += 1;
-                    seq += 1;
-                }
+                outbound = outbound_rx.recv(), if has_credit => match outbound {
+                    Some(Outbound::Block { slice_no, block_in_slice, emit_floor, payload }) => {
+                        pacer.consume();
+                        self.socket.send_to_group(Message::Data(Data {
+                            transfer_id,
+                            seq,
+                            slice_no,
+                            block_in_slice,
+                            emit_floor,
+                            payload: payload.into(),
+                        })).await?;
+                        seq += 1;
+                    }
+                    Some(Outbound::Eof { total_bytes: bytes, total_blocks: blocks }) => {
+                        total_bytes = bytes;
+                        total_blocks = blocks;
+                        let total_slices =
+                            blocks.div_ceil(self.blocks_per_slice.get() as u64) as u32;
+                        group.on_eof(total_slices);
+                        draining = true;
+                        drain_deadline = Some(Instant::now() + self.max_wait);
+                        self.socket.send_to_group(Message::Done(Done {
+                            transfer_id,
+                            total_bytes,
+                            total_blocks,
+                        })).await?;
+                    }
+                    None => break Err(ProtoError::EgressClosed),
+                },
 
                 _ = tokio::time::sleep(until_credit), if !has_credit => {}
 
                 _ = tick.tick() => {
                     rate_controller.tick(pacer.take_starvation());
-                },
+                    let now = std::time::Instant::now();
+                    for (target, stuck_at) in group.reap_silent(now, LIVENESS_TIMEOUT) {
+                        let reason = format!(
+                            "silent for {LIVENESS_TIMEOUT:?} while stuck at slice {stuck_at}"
+                        );
+                        warn!(target, stuck_at, "evicting silent participant");
+                        self.socket.send_to_group(Message::Evicted(Evicted {
+                            transfer_id,
+                            target,
+                            reason,
+                        })).await?;
+                    }
+                    if draining {
+                        self.socket.send_to_group(Message::Done(Done {
+                            transfer_id,
+                            total_bytes,
+                            total_blocks,
+                        })).await?;
+                    }
+                }
+
+                _ = tokio::time::sleep(drain_left.unwrap_or_default()), if drain_left.is_some() => {
+                    break Err(ProtoError::TransferIncomplete {
+                        complete: group.complete_count(),
+                        participants: participants_at_start,
+                    });
+                }
 
                 m = self.socket.recv_in_transfer(transfer_id) => {
                     let (message, _) = m?;
@@ -99,12 +166,22 @@ impl Sender {
                             if !group.contains(stats.receiver_id) {
                                 continue;
                             }
-                            group.on_stats(&stats);
-                            rate_controller.on_report(
-                                stats.receiver_id,
-                                stats.total_received,
-                                stats.total_expected
-                            );
+                            group.mark_seen(stats.receiver_id, std::time::Instant::now());
+                            if let Some(needed_from) = group.on_stats(&stats) {
+                                let _ = feedback_tx.send(Feedback::Needed(needed_from));
+                            }
+                            if let Some((seen, expected)) = group.report_delta(&stats) {
+                                rate_controller.on_report(stats.receiver_id, seen, expected);
+                            }
+                        }
+                        Message::Nak(nak) => {
+                            let blocks = group.on_nak(&nak, std::time::Instant::now());
+                            if !blocks.is_empty() {
+                                let _ = feedback_tx.send(Feedback::Resend {
+                                    slice_no: nak.slice_no,
+                                    blocks,
+                                });
+                            }
                         }
                         Message::Leave { receiver_id, .. } => {
                             group.leave(receiver_id);
@@ -113,16 +190,11 @@ impl Sender {
                     }
                 }
             }
-        }
+        };
 
-        let done_message = Message::Done(Done {
-            transfer_id,
-            total_bytes,
-            total_blocks: block_no.into(),
-        });
-        self.socket.send_to_group(done_message).await?;
-
-        Ok(())
+        let _ = feedback_tx.send(Feedback::Done);
+        let _ = slicer_task.await;
+        result
     }
 
     async fn gather_participants(&self, transfer_id: u64) -> Result<Group, ProtoError> {

@@ -11,11 +11,12 @@ use tokio::net::UdpSocket;
 async fn receive_stream(group_id: u8, port: u16) -> tokio::task::JoinHandle<Vec<u8>> {
     let receiver = common::receiver(common::group(group_id), port);
     tokio::spawn(async move {
-        let mut blocks = receiver.recv_stream().await.expect("receive stream");
+        let mut transfer = receiver.recv_stream();
         let mut received = Vec::new();
-        while let Some(block) = blocks.recv().await {
+        while let Some(block) = transfer.recv().await {
             received.extend_from_slice(&block);
         }
+        transfer.finish().await.expect("finish");
         received
     })
 }
@@ -26,7 +27,7 @@ async fn streams_payload_to_a_channel() {
     let receiving = receive_stream(30, 48000).await;
 
     common::sender(common::group(30), 48000, 1)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 
@@ -39,7 +40,7 @@ async fn streams_partial_final_block() {
     let receiving = receive_stream(31, 48010).await;
 
     common::sender(common::group(31), 48010, 1)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 
@@ -47,13 +48,12 @@ async fn streams_partial_final_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "recv_stream completes the transfer before returning its channel, so it deadlocks once the 32-slot channel fills"]
 async fn streams_more_blocks_than_the_channel_holds() {
-    let sent = common::payload(64 * BLOCK_SIZE);
+    let sent = common::payload(512 * BLOCK_SIZE);
     let receiving = receive_stream(32, 48020).await;
 
     common::sender(common::group(32), 48020, 1)
-        .send_stream(sent.as_slice())
+        .send_stream(common::source(&sent))
         .await
         .expect("send");
 

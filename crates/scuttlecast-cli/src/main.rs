@@ -27,13 +27,20 @@ fn init_tracing() {
 }
 
 #[tokio::main()]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     init_tracing();
     let args = Args::parse();
-    if let Err(e) = match args.mode {
+
+    let outcome = match args.mode {
         Mode::Send(args) => send::send(args).await,
         Mode::Receive(args) => receive::receive(args).await,
-    } {
-        println!("failed to run: {}", e)
     };
+
+    match outcome {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

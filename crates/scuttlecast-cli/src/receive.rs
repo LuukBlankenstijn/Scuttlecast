@@ -1,7 +1,6 @@
 use clap::Parser;
 use scuttlecast::error::ProtoError;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
-use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -37,22 +36,20 @@ pub async fn receive(args: Args) -> Result<(), ProtoError> {
         .socket(args.local_ip, args.group_ip, args.port)?
         .max_wait(args.wait)
         .build();
-    match args.file {
-        Some(path) => {
-            receiver.recv_file(path).await?;
-            println!("successfully received file");
-        }
-        None => {
-            let mut rx = receiver.recv_stream().await?;
-            let mut stdout = tokio::io::stdout();
-            while let Some(block) = rx.recv().await {
-                stdout.write_all(&block).await?;
-            }
-            stdout.flush().await?;
-            println!();
-            println!("successfully received stream");
-        }
-    }
+
+    let summary = match args.file {
+        Some(path) => receiver.recv_file(path).await?,
+        None => receiver.recv_to(tokio::io::stdout()).await?,
+    };
+
+    tracing::info!(
+        bytes = summary.total_bytes,
+        blocks = summary.total_blocks,
+        duplicates = summary.duplicates,
+        naks = summary.naks_sent,
+        loss = format!("{:.2}%", summary.loss() * 100.0),
+        "transfer complete"
+    );
 
     Ok(())
 }

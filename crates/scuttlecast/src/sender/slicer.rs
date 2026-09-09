@@ -33,9 +33,9 @@ impl Slicer {
 
     pub async fn run(
         mut self,
-        reader: impl AsyncRead + Unpin,
+        reader: impl AsyncRead + Unpin + Send + 'static,
         outbound: mpsc::Sender<Outbound>,
-        mut feedback: mpsc::Receiver<Feedback>,
+        mut feedback: mpsc::UnboundedReceiver<Feedback>,
     ) -> Result<(), ProtoError> {
         let mut input = Box::pin(blocks::split(reader, BLOCK_SIZE));
         let mut drained = false;
