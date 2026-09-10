@@ -810,14 +810,16 @@ name = "scuttlecast"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "bincode",
  "bon",
  "bytes",
  "derive_more",
  "futures-core",
  "futures-util",
+ "proptest",
+ "proptest-derive",
  "rand 0.10.2",
  "reed-solomon-erasure",
- "scuttlecast-proto",
  "socket2",
  "tempfile",
  "thiserror",
@@ -834,18 +836,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "scuttlecast-proto"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytes",
- "derive_more",
- "proptest",
- "proptest-derive",
- "thiserror",
 ]
 
 [[package]]

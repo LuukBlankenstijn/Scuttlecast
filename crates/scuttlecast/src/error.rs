@@ -9,7 +9,7 @@ pub enum ProtoError {
     File(std::io::Error),
 
     #[error(transparent)]
-    Protocol(#[from] proto::Error),
+    Protocol(#[from] crate::proto::Error),
 
     #[error("invalid erasure-coding configuration: {0}")]
     Fec(#[from] reed_solomon_erasure::Error),

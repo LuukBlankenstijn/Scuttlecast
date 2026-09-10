@@ -9,7 +9,7 @@ use bincode::{
 use bytes::Bytes;
 use derive_more::{Deref, Display, From, Into};
 
-use crate::error::Error;
+use crate::proto::error::Error;
 
 /// Block payload, encoded as a length-prefixed byte slice
 #[derive(Debug, Clone, PartialEq, Deref, From, Into, Display)]
@@ -172,7 +172,7 @@ pub struct Done {
 #[cfg(test)]
 mod tests {
     use super::{Data, NonZeroU16, Payload};
-    use crate::error::Error;
+    use crate::proto::error::Error;
     use proptest::prelude::*;
 
     fn blocks_per_slice(blocks: u16) -> NonZeroU16 {

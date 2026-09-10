@@ -3,9 +3,9 @@ mod common;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use proto::Message;
 use scuttlecast::BLOCK_SIZE;
 use scuttlecast::Losing;
+use scuttlecast::proto::Message;
 
 const BLOCKS_PER_SLICE: u64 = 32;
 

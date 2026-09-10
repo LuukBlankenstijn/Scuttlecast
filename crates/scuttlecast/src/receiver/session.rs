@@ -5,8 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::proto::{Data, Done, Hello, Message, Nak, Parity, Stats};
 use bytes::Bytes;
-use proto::{Data, Done, Hello, Message, Nak, Parity, Stats};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::debug;
 

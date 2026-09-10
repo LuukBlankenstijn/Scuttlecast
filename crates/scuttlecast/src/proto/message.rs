@@ -2,9 +2,9 @@ use bincode::config::standard;
 use bincode::{Decode, Encode};
 use derive_more::Display;
 
-use crate::MAX_DATAGRAM_SIZE;
-use crate::error::Error;
-use crate::payload::{Data, Done, Evicted, Hello, Nak, Parity, Stats};
+use super::MAX_DATAGRAM_SIZE;
+use super::error::Error;
+use super::payload::{Data, Done, Evicted, Hello, Nak, Parity, Stats};
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]

@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
+use crate::proto::{Data, Done, Evicted, Hello, Message, Parity};
 use bon::Builder;
-use proto::{Data, Done, Evicted, Hello, Message, Parity};
 use tokio::{
     io::AsyncRead,
     sync::{mpsc, watch},

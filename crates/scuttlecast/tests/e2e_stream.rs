@@ -3,8 +3,8 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
-use proto::{Data, Done, Hello, Message};
 use scuttlecast::error::ProtoError;
+use scuttlecast::proto::{Data, Done, Hello, Message};
 use scuttlecast::{BLOCK_SIZE, SILENCE_TIMEOUT};
 use tokio::net::UdpSocket;
 

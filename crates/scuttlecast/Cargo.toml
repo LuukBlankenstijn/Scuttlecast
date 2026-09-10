@@ -10,9 +10,15 @@ keywords = ["multicast", "udp", "transfer", "fec", "reliable"]
 categories = ["network-programming"]
 
 [dependencies]
-proto.workspace = true
+bincode.workspace = true
 async-stream.workspace = true
-derive_more = { workspace = true, features = ["constructor"] }
+derive_more = { workspace = true, features = [
+    "constructor",
+    "display",
+    "deref",
+    "from",
+    "into",
+] }
 futures-core.workspace = true
 futures-util.workspace = true
 rand.workspace = true
@@ -35,4 +41,6 @@ tokio = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
+proptest-derive.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

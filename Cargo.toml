@@ -10,7 +10,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/LuukBlankenstijn/Scuttlecast"
 
 [workspace.dependencies]
-proto = { package = "scuttlecast-proto", path = "crates/scuttlecast-proto", version = "0.1.0" }
 scuttlecast = { path = "crates/scuttlecast", version = "0.1.0" }
 async-stream = "0.3"
 bincode = "2.0"

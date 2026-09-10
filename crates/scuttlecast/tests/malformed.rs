@@ -4,8 +4,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use bytes::Bytes;
-use proto::{Data, Hello, Message};
 use scuttlecast::error::ProtoError;
+use scuttlecast::proto::{Data, Hello, Message};
 
 fn blocks_per_slice(blocks: u16) -> NonZeroU16 {
     NonZeroU16::new(blocks).expect("nonzero blocks per slice")
@@ -63,7 +63,7 @@ async fn rejects_block_index_outside_its_slice() {
     assert!(
         matches!(
             result,
-            Err(ProtoError::Protocol(proto::Error::BlockOutsideSlice {
+            Err(ProtoError::Protocol(scuttlecast::proto::Error::BlockOutsideSlice {
                 block_in_slice: 32,
                 blocks_per_slice
             })) if blocks_per_slice.get() == 32
@@ -93,7 +93,10 @@ async fn rejects_a_hello_claiming_zero_blocks_per_slice() {
         .expect("receiver did not panic");
 
     assert!(
-        matches!(result, Err(ProtoError::Protocol(proto::Error::Decode(_)))),
+        matches!(
+            result,
+            Err(ProtoError::Protocol(scuttlecast::proto::Error::Decode(_)))
+        ),
         "got {result:?}"
     );
 }

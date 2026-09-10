@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::proto::{Nak, Stats};
 use crate::{HOLDOFF, state::ReceiverState};
-use proto::{Nak, Stats};
 
 /// Transmissions a reporting window needs before its loss ratio means
 /// anything. Below this a single drop reads as a loss rate high enough to
@@ -299,7 +299,7 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::{Group, HOLDOFF};
-    use proto::{Nak, Stats};
+    use crate::proto::{Nak, Stats};
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 

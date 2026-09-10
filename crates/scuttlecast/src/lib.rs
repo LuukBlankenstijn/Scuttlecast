@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 pub mod error;
+pub mod proto;
 pub mod receiver;
 pub mod sender;
 pub mod state;

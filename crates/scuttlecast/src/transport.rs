@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 
-use proto::Message;
+use crate::proto::Message;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
@@ -67,7 +67,7 @@ impl MessageSocket {
 
     pub async fn recv_from(&self) -> Result<(Message, SocketAddr), ProtoError> {
         loop {
-            let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
+            let mut buf = [0u8; crate::proto::MAX_DATAGRAM_SIZE];
             let (len, src) = self.socket.recv_from(&mut buf).await?;
             let message = Message::decode(&buf[..len])?;
 
@@ -91,7 +91,7 @@ impl MessageSocket {
     }
 
     pub async fn send_to(&self, message: Message, to: SocketAddr) -> Result<(), ProtoError> {
-        let mut buf = [0u8; proto::MAX_DATAGRAM_SIZE];
+        let mut buf = [0u8; crate::proto::MAX_DATAGRAM_SIZE];
         let len = message.encode_into(&mut buf)?;
         self.socket.send_to(&buf[..len], to).await?;
         Ok(())
