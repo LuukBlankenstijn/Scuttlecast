@@ -1,5 +1,6 @@
 use clap::Parser;
 use clap::Subcommand;
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 mod receive;
@@ -27,6 +28,7 @@ fn init_tracing() {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
 }
