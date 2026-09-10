@@ -255,7 +255,7 @@ async fn recovers_from_parity_without_asking_for_anything() {
 /// Long enough for a receiver to report a loss rate at all
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clean_link_stops_carrying_parity() {
-    let sent = common::payload(600 * BLOCK_SIZE);
+    let sent = common::payload(6000 * BLOCK_SIZE);
 
     let observed = parity_over_transfer(56, 16080, &sent, Losing::default()).await;
 
@@ -268,7 +268,7 @@ async fn a_clean_link_stops_carrying_parity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lossy_link_keeps_carrying_parity() {
-    let sent = common::payload(600 * BLOCK_SIZE);
+    let sent = common::payload(6000 * BLOCK_SIZE);
 
     let observed = parity_over_transfer(57, 16090, &sent, every_nth_block(10, 3)).await;
 

@@ -12,13 +12,13 @@ const DEMAND_IMPROVEMENT: f64 = 0.8;
 const K: f64 = 4.0;
 const MIN_FACTOR: f64 = 0.5;
 const GOOD_TICKS_NEEDED: u32 = 3;
-const SLOW_START_FACTOR: f64 = 2.0;
+const SLOW_START_FACTOR: f64 = 4.0;
 const RECOVERY_TARGET: Duration = Duration::from_secs(10);
 pub const TICK_INTERVAL: Duration = Duration::from_millis(200);
 const RATE_RECOVERY_FRACTION: f64 =
     TICK_INTERVAL.as_millis() as f64 / RECOVERY_TARGET.as_millis() as f64;
 const MIN_RATE: f64 = 50.0;
-const INITIAL_RATE: f64 = 200.0;
+const INITIAL_RATE: f64 = 6000.0;
 const STALENESS_LIMIT: Duration = Duration::from_secs(1);
 const TAU: Duration = Duration::from_millis(300);
 const BURST_QUANTUM: Duration = Duration::from_millis(2);

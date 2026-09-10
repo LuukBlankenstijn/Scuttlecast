@@ -151,6 +151,9 @@ impl Sender {
                         break Err(ProtoError::EgressClosed);
                     }
                     source_wait += waited_since.elapsed();
+                    if taken == budget && !outbound_rx.is_empty() {
+                        pacer.waited();
+                    }
 
                     for outbound in batch.drain(..) {
                         match outbound {
