@@ -67,12 +67,18 @@ RUST_LOG=scuttle=info "$scuttle" send \
 elapsed_ms=$((($(date +%s%N) - started) / 1000000))
 
 status=0
+exits=()
 for pid in "${pids[@]}"; do
-    wait "$pid" || status=1
+    if wait "$pid"; then
+        exits+=(0)
+    else
+        exits+=("$?")
+        status=1
+    fi
 done
 
 echo
-printf '%-4s %-8s %-8s %-6s %-6s %s\n' idx result loss naks late bytes
+printf '%-4s %-6s %-8s %-8s %-6s %-6s %s\n' idx exit result loss naks late bytes
 for index in $(seq 0 $((receivers - 1))); do
     log=$work/recv$index.log
     got=$(sha256sum "$work/out$index.bin" 2>/dev/null | cut -d' ' -f1)
@@ -81,10 +87,15 @@ for index in $(seq 0 $((receivers - 1))); do
     result=CORRUPT
     [[ $got == "$want" ]] && result=ok || status=1
 
-    printf '%-4s %-8s %-8s %-6s %-6s %s\n' \
-        "$index" "$result" "${observed:-?}" "$(field naks)" "$(field late)" "$(field bytes)"
+    printf '%-4s %-6s %-8s %-8s %-6s %-6s %s\n' \
+        "$index" "${exits[index]}" "$result" "${observed:-?}" \
+        "$(field naks)" "$(field late)" "$(field bytes)"
 
-    if [[ -z $observed || $observed == 0.00% ]]; then
+    if [[ -z $observed ]]; then
+        echo "  receiver $index reported nothing, so its log follows" >&2
+        tail -3 "$log" >&2 || true
+        status=1
+    elif [[ $observed == 0.00% ]]; then
         echo "  receiver $index saw no loss, so this proved nothing" >&2
         status=1
     fi

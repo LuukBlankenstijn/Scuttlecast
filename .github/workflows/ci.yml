@@ -72,5 +72,5 @@ jobs:
       - name: Transfer through a lossy network
         run: |
           for loss in 1 10; do
-            SCUTTLE=target/release/scuttle ./scripts/netem-transfer.sh "$loss" 3 8
+            sudo SCUTTLE=target/release/scuttle ./scripts/netem-transfer.sh "$loss" 3 8
           done
