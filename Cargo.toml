@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Luuk Blankenstijn <git@luukblankenstijn.nl>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/LuukBlankenstijn/Scuttlecast"
 
 [workspace.dependencies]
-scuttlecast = { path = "crates/scuttlecast", version = "0.1.0" }
+scuttlecast = { path = "crates/scuttlecast", version = "0.1.1" }
 async-stream = "0.3"
 bincode = "2.0"
 clap = { version = "4.6.6", features = ["derive"] }
