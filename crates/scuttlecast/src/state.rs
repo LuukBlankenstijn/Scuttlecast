@@ -68,7 +68,7 @@ impl std::fmt::Display for LimitingFactor {
 }
 
 /// What the sender knows about its own bottleneck at one control tick
-pub struct Bottleneck {
+pub(crate) struct Bottleneck {
     /// The participant with the lowest progress, and how far behind it is
     pub slowest: Option<(u64, u32)>,
     /// The participant losing the most, and its recent loss
