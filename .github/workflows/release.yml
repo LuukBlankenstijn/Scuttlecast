@@ -20,12 +20,10 @@ jobs:
       - uses: actions/checkout@v5
 
       - run: rustup toolchain install stable --profile minimal
-
       - name: The release tag names the version being published
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version="$(cargo metadata --format-version 1 --no-deps |
-            grep -oE '"name":"scuttlecast","version":"[^"]+"' | cut -d'"' -f8)"
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
           if [[ "$tag" != "$version" ]]; then
             echo "release $GITHUB_REF_NAME does not match workspace version $version" >&2
             exit 1
