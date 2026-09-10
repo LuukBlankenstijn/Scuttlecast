@@ -6,17 +6,18 @@ use scuttlecast::state::TransferState;
 use tokio::sync::watch;
 use tracing::{debug, info};
 
+/// Send a file or stream to a multicast group
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     /// File to read from
     #[arg(short, long, value_parser = clap::value_parser!(PathBuf))]
     file: Option<PathBuf>,
 
-    /// interface to use for multicast, defaults to the default interface
+    /// Interface to use for multicast, defaults to the default interface
     #[arg(short, long, default_value_t = Ipv4Addr::UNSPECIFIED)]
     local_ip: Ipv4Addr,
 
-    /// Port to use. sender uses port and receiver uses port+1
+    /// Port to use. The sender uses this port, receivers use port + 1
     #[arg(short, long, default_value_t = 5000)]
     port: u16,
 
@@ -24,11 +25,12 @@ pub struct Args {
     #[arg(short, long, default_value_t = Ipv4Addr::from([239, 1, 1, 1]))]
     group_ip: Ipv4Addr,
 
-    /// Minimum amount of receivers to wait for before starting sending
+    /// Receivers to wait for before sending, defaults to one
     #[arg(short, long)]
     min_receivers: Option<usize>,
 
-    /// Time in seconds the sender waits for clients to join
+    /// Seconds to wait for receivers to join, and afterwards for stragglers
+    /// to finish
     #[arg(short, long, default_value = "300", value_parser = parse_seconds)]
     wait: Duration,
 
@@ -36,8 +38,8 @@ pub struct Args {
     #[arg(long)]
     max_rate: Option<f64>,
 
-    /// Parity shards per slice. Each one lets a receiver lose one more shard
-    /// without asking for it, and costs its share of the bandwidth.
+    /// Most parity shards a slice may carry. The sender sends fewer as
+    /// receivers report less loss, and none on a clean link.
     #[arg(long)]
     parity: Option<u16>,
 }

@@ -2,25 +2,26 @@ use clap::Parser;
 use scuttlecast::error::ProtoError;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 
+/// Receive a transfer from a multicast group
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     /// File to write to, if omitted written to stdout
     #[arg(short, long, value_parser = clap::value_parser!(PathBuf))]
     file: Option<PathBuf>,
 
-    /// interface to use for multicast, defaults to the default interface
+    /// Interface to use for multicast, defaults to the default interface
     #[arg(short, long, default_value_t = Ipv4Addr::UNSPECIFIED)]
     local_ip: Ipv4Addr,
 
-    /// Ports to use. sender uses port and receiver uses port+1
+    /// Port to use. The sender uses this port, receivers use port + 1
     #[arg(short, long, default_value_t = 5000)]
     port: u16,
 
-    /// Multicast ip
+    /// Multicast address
     #[arg(short, long, default_value_t = Ipv4Addr::from([239, 1, 1, 1]))]
     group_ip: Ipv4Addr,
 
-    /// Time in seconds the receiver waits for an initial hello message
+    /// Seconds to wait for a sender to announce a transfer
     #[arg(short, long, default_value = "300", value_parser = parse_seconds)]
     wait: Duration,
 }

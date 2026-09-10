@@ -4,20 +4,23 @@ pub mod error;
 pub mod receiver;
 pub mod sender;
 pub mod state;
-pub mod transport;
+mod transport;
+
+pub use transport::Losing;
 
 pub const BLOCK_SIZE: usize = 1400;
 
 /// How often a receiver reports, which is also what frees the sender's window
-pub const STATS_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const STATS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A receiver repeats a request this long after the last one
-pub const RENAK_INTERVAL: Duration = STATS_INTERVAL.saturating_mul(2);
+pub(crate) const RENAK_INTERVAL: Duration = STATS_INTERVAL.saturating_mul(2);
 
 /// How long a repair suppresses further requests for the same shard. Below
 /// `RENAK_INTERVAL`, or a receiver's genuine repeat lands inside the window and
 /// is swallowed.
-pub const HOLDOFF: Duration = Duration::from_millis(RENAK_INTERVAL.as_millis() as u64 * 3 / 4);
+pub(crate) const HOLDOFF: Duration =
+    Duration::from_millis(RENAK_INTERVAL.as_millis() as u64 * 3 / 4);
 
 /// Nothing heard from the far end for this long means the machine is gone
 pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(10);

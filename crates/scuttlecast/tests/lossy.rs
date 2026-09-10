@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use proto::Message;
 use scuttlecast::BLOCK_SIZE;
-use scuttlecast::transport::Losing;
+use scuttlecast::Losing;
 
 const BLOCKS_PER_SLICE: u64 = 32;
 

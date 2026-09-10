@@ -12,6 +12,11 @@ enum Mode {
 }
 
 #[derive(Debug, Clone, Parser)]
+#[command(
+    name = "scuttle",
+    version,
+    about = "Reliable multicast file and stream transfer"
+)]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
