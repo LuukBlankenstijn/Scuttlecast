@@ -41,7 +41,7 @@ async fn receive_one_transfer(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_block_index_outside_its_slice() {
-    let (rogue, receiving, _output) = receive_one_transfer(80, 53000).await;
+    let (rogue, receiving, _output) = receive_one_transfer(80, 19000).await;
 
     rogue.send(Message::Hello(hello(1, 32))).await;
     rogue
@@ -74,7 +74,7 @@ async fn rejects_block_index_outside_its_slice() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_a_hello_claiming_zero_blocks_per_slice() {
-    let (rogue, receiving, _output) = receive_one_transfer(81, 53010).await;
+    let (rogue, receiving, _output) = receive_one_transfer(81, 19010).await;
 
     let mut bytes = Message::Hello(hello(2, 1)).encode().expect("encode");
     let blocks_per_slice_byte = bytes.len() - 3;

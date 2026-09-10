@@ -115,7 +115,7 @@ async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Los
 async fn repairs_a_receiver_losing_a_fifth_of_the_blocks() {
     let sent = common::payload(3 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
 
-    let received = transfer_with_loss(50, 50000, &sent, vec![every_nth_block(5, 0)]).await;
+    let received = transfer_with_loss(50, 16000, &sent, vec![every_nth_block(5, 0)]).await;
 
     assert_eq!(received, vec![sent]);
 }
@@ -126,7 +126,7 @@ async fn repairs_three_receivers_losing_different_blocks() {
 
     let received = transfer_with_loss(
         51,
-        50010,
+        16010,
         &sent,
         vec![
             every_nth_block(4, 0),
@@ -143,7 +143,7 @@ async fn repairs_three_receivers_losing_different_blocks() {
 async fn repairs_the_tail_when_the_repair_is_lost_too() {
     let sent = common::payload(2 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE + 7);
 
-    let received = transfer_with_loss(52, 50020, &sent, vec![slice_swallowed(2, 2)]).await;
+    let received = transfer_with_loss(52, 16020, &sent, vec![slice_swallowed(2, 2)]).await;
 
     assert_eq!(received, vec![sent]);
 }
@@ -154,7 +154,7 @@ async fn finishes_when_the_first_announcements_of_the_end_are_lost() {
 
     let received = transfer_with_loss(
         53,
-        50030,
+        16030,
         &sent,
         vec![first_few(3, |message| matches!(message, Message::Done(_)))],
     )
@@ -167,7 +167,7 @@ async fn finishes_when_the_first_announcements_of_the_end_are_lost() {
 async fn repairs_a_gap_that_stalled_the_senders_window() {
     let sent = common::payload(6 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
     let group = common::group(55);
-    let port = 50050;
+    let port = 16050;
     let output = common::Output::new();
     let path = output.path("stalled.bin");
 
@@ -189,7 +189,7 @@ async fn repairs_a_gap_that_stalled_the_senders_window() {
 async fn serves_one_repair_for_a_loss_every_receiver_suffered() {
     let sent = common::payload(2 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
     let group = common::group(54);
-    let port = 50040;
+    let port = 16040;
     let output = common::Output::new();
 
     let receiving: Vec<_> = (0..3)
@@ -220,7 +220,7 @@ async fn serves_one_repair_for_a_loss_every_receiver_suffered() {
 async fn recovers_from_parity_without_asking_for_anything() {
     let sent = common::payload(3 * BLOCKS_PER_SLICE as usize * BLOCK_SIZE);
     let group = common::group(56);
-    let port = 50060;
+    let port = 16060;
     let output = common::Output::new();
 
     let receiving: Vec<_> = (0..3)
@@ -257,7 +257,7 @@ async fn recovers_from_parity_without_asking_for_anything() {
 async fn a_clean_link_stops_carrying_parity() {
     let sent = common::payload(600 * BLOCK_SIZE);
 
-    let observed = parity_over_transfer(56, 50080, &sent, Losing::default()).await;
+    let observed = parity_over_transfer(56, 16080, &sent, Losing::default()).await;
 
     assert_eq!(
         observed.last().copied(),
@@ -270,7 +270,7 @@ async fn a_clean_link_stops_carrying_parity() {
 async fn a_lossy_link_keeps_carrying_parity() {
     let sent = common::payload(600 * BLOCK_SIZE);
 
-    let observed = parity_over_transfer(57, 50090, &sent, every_nth_block(10, 3)).await;
+    let observed = parity_over_transfer(57, 16090, &sent, every_nth_block(10, 3)).await;
 
     let settled = observed.last().copied().expect("a published count");
     assert!(

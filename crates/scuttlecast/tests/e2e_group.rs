@@ -19,10 +19,10 @@ async fn both_receivers_get_the_whole_payload() {
     let first = output.path("first.bin");
     let second = output.path("second.bin");
 
-    let receiving_first = spawn_receiver(20, 47000, first.clone());
-    let receiving_second = spawn_receiver(20, 47000, second.clone());
+    let receiving_first = spawn_receiver(20, 13000, first.clone());
+    let receiving_second = spawn_receiver(20, 13000, second.clone());
 
-    common::sender(common::group(20), 47000, 2)
+    common::sender(common::group(20), 13000, 2)
         .send_stream(common::source(&sent))
         .await
         .expect("send");
@@ -41,19 +41,19 @@ async fn sender_waits_until_min_receivers_joined() {
     let first = output.path("first.bin");
     let second = output.path("second.bin");
 
-    let receiving_first = spawn_receiver(21, 47010, first.clone());
+    let receiving_first = spawn_receiver(21, 13010, first.clone());
 
     let delay = Duration::from_millis(600);
     let late = {
         let second = second.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            spawn_receiver(21, 47010, second).await.expect("late");
+            spawn_receiver(21, 13010, second).await.expect("late");
         })
     };
 
     let started = Instant::now();
-    common::sender(common::group(21), 47010, 2)
+    common::sender(common::group(21), 13010, 2)
         .send_stream(common::source(&sent))
         .await
         .expect("send");
@@ -75,9 +75,9 @@ async fn sender_proceeds_when_min_receivers_never_arrive() {
     let output = common::Output::new();
     let path = output.path("only.bin");
 
-    let receiving = spawn_receiver(22, 47020, path.clone());
+    let receiving = spawn_receiver(22, 13020, path.clone());
 
-    common::sender_with(common::group(22), 47020, 5, Duration::from_millis(500))
+    common::sender_with(common::group(22), 13020, 5, Duration::from_millis(500))
         .send_stream(common::source(&sent))
         .await
         .expect("send");
@@ -96,10 +96,10 @@ async fn three_receivers_get_identical_payloads() {
 
     let receiving: Vec<_> = paths
         .iter()
-        .map(|path| spawn_receiver(23, 47030, path.clone()))
+        .map(|path| spawn_receiver(23, 13030, path.clone()))
         .collect();
 
-    common::sender(common::group(23), 47030, 3)
+    common::sender(common::group(23), 13030, 3)
         .send_stream(common::source(&sent))
         .await
         .expect("send");
@@ -122,7 +122,7 @@ async fn a_sender_with_no_stated_minimum_waits_for_a_receiver() {
 
     let sending = tokio::spawn({
         let sender = scuttlecast::sender::Sender::builder()
-            .socket(common::LOCAL, common::group(24), 47040)
+            .socket(common::LOCAL, common::group(24), 13040)
             .expect("bind sender")
             .max_wait(common::MAX_WAIT)
             .build();
@@ -131,7 +131,7 @@ async fn a_sender_with_no_stated_minimum_waits_for_a_receiver() {
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    spawn_receiver(24, 47040, path.clone())
+    spawn_receiver(24, 13040, path.clone())
         .await
         .expect("receive");
 
