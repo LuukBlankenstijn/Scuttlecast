@@ -1,7 +1,13 @@
 [package]
 name = "scuttlecast-cli"
-version = "0.1.0"
-edition = "2024"
+description = "Command line tool for reliable file and stream transfer over UDP multicast, installs as `scuttle`"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["multicast", "udp", "transfer", "imaging", "cli"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "scuttle"

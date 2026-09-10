@@ -1,7 +1,13 @@
 [package]
 name = "scuttlecast-proto"
-version = "0.1.0"
-edition = "2024"
+description = "Wire protocol and codec for scuttlecast, a reliable multicast transfer tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["multicast", "protocol", "codec", "udp"]
+categories = ["network-programming", "encoding"]
 
 [dependencies]
 bincode.workspace = true

@@ -1,7 +1,13 @@
 [package]
 name = "scuttlecast"
-version = "0.1.0"
-edition = "2024"
+description = "Reliable one-to-many file and stream transfer over UDP multicast, with adaptive forward error correction and per-receiver bottleneck reporting"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["multicast", "udp", "transfer", "fec", "reliable"]
+categories = ["network-programming"]
 
 [dependencies]
 proto.workspace = true
@@ -29,5 +35,4 @@ tokio = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-proto.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
