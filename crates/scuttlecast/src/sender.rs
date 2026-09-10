@@ -32,26 +32,17 @@ mod slicer;
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
 const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
 
-/// Loss arrives in bursts, so parity covers this multiple of the blocks the
-/// reported loss rate would take out of an average slice. Below two, a slice
-/// unlucky enough to lose twice its share needs a repair anyway and the shards
-/// bought nothing.
+/// Loss arrives in bursts, so parity covers this multiple of the average
 const PARITY_HEADROOM: f64 = 2.0;
 
-/// Waiting on the source for less than this much of a tick is what any
-/// pipeline does between blocks. Above it the sender is genuinely being fed
-/// too slowly, which a spinning disk does long before it stalls outright.
+/// Source waits shorter than this are what any pipeline does between blocks
 const SOURCE_WAIT_FLOOR: Duration = Duration::from_millis(TICK_INTERVAL.as_millis() as u64 / 8);
 
-/// A receiver waiting this much of a reporting window to hand its blocks on is
-/// being fed faster than it can write. Below it, a sink that pauses between
-/// writes is just a pipeline breathing.
+/// A sink waiting this much of a reporting window cannot keep up
 const SINK_STALL_FLOOR: u32 = STATS_INTERVAL.as_millis() as u32 / 4;
 const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
-/// Blocks taken from the slicer per pass through the send loop. Each pass
-/// arms and drops a handful of timers, which at one block per pass cost more
-/// than sending the block did.
+/// Blocks taken from the slicer per pass through the send loop
 const SEND_BATCH: usize = 256;
 
 #[derive(Builder)]
@@ -62,7 +53,9 @@ pub struct Sender {
     socket: MessageSocket,
     #[builder(default = Duration::new(5 * 60, 0))]
     max_wait: Duration,
-    min_receivers: Option<usize>,
+    /// Receivers to wait for before starting
+    #[builder(default = 1)]
+    min_receivers: usize,
     #[builder(default = DEFAULT_BLOCKS_PER_SLICE)]
     blocks_per_slice: NonZeroU16,
     #[builder(default = DEFAULT_MAX_LIVE_SLICES)]
@@ -378,7 +371,7 @@ impl Sender {
                 _ = tokio::time::sleep_until(deadline) => break,
             }
 
-            if Some(group.len()) >= self.min_receivers {
+            if group.len() >= self.min_receivers {
                 break;
             }
         }
@@ -386,15 +379,8 @@ impl Sender {
     }
 }
 
-/// Parity shards that cover the loss the worst receiver reports. Loss arrives
-/// in bursts rather than spread evenly over a slice, so the shards have to
-/// cover a multiple of the average rather than the average itself. A clean
-/// link asks for none, which costs nothing to send and nothing to encode.
-///
-/// A transfer too short for any receiver to have measured a loss rate keeps
-/// the full width it was configured with: the alternative is dropping cover
-/// on the strength of a number nobody has reported, and a short transfer that
-/// loses a block then pays a round trip for it.
+/// Parity shards covering the loss the worst receiver reports, or the full
+/// width while no receiver has measured one yet
 fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u16) -> u16 {
     let Some(loss) = loss else {
         return max_parity;
@@ -410,12 +396,6 @@ mod tests {
     use crate::BLOCK_SIZE;
     use std::num::NonZeroU16;
 
-    /// A sender may only run one window ahead of the slice a receiver last
-    /// reported, so the window and the reporting interval together cap
-    /// throughput whatever the link and the hardware can do. Widening the
-    /// interval or narrowing the window silently throttles every transfer,
-    /// which is invisible in every other test here. The defaults have to
-    /// leave a gigabit link plenty of room.
     #[test]
     fn the_default_window_and_report_interval_clear_a_gigabit_link() {
         let window = DEFAULT_MAX_LIVE_SLICES.get() as f64

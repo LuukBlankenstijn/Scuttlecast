@@ -112,3 +112,29 @@ async fn three_receivers_get_identical_payloads() {
         assert_eq!(std::fs::read(path).expect("read"), sent);
     }
 }
+
+/// No receiver can have joined before the first hello goes out
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sender_with_no_stated_minimum_waits_for_a_receiver() {
+    let sent = common::payload(5 * BLOCK_SIZE);
+    let output = common::Output::new();
+    let path = output.path("late.bin");
+
+    let sending = tokio::spawn({
+        let sender = scuttlecast::sender::Sender::builder()
+            .socket(common::LOCAL, common::group(24), 47040)
+            .expect("bind sender")
+            .max_wait(common::MAX_WAIT)
+            .build();
+        let sent = sent.clone();
+        async move { sender.send_stream(common::source(&sent)).await }
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    spawn_receiver(24, 47040, path.clone())
+        .await
+        .expect("receive");
+
+    sending.await.expect("join").expect("send");
+    assert_eq!(std::fs::read(&path).expect("read"), sent);
+}
