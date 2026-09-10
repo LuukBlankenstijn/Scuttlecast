@@ -119,13 +119,8 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
     }
 }
 
-/// A consumer that stops reading for longer than a peer may stay silent, which
-/// is what a disk pausing for a transaction commit looks like. The payload
-/// outruns both buffers: the receiver's channel fills, so its output is backed
-/// up, and the sender's window fills behind it, so the sender has nothing left
-/// to send. Both sides then have to keep talking through the pause. A receiver
-/// that stops reporting is evicted as a dead machine, and a sender that says
-/// nothing looks dead in turn.
+/// The payload outruns both buffers, so the receiver.s channel fills and the
+/// sender.s window fills behind it
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn survives_a_consumer_that_stops_reading_past_the_silence_timeout() {
     let sent = common::payload(1024 * BLOCK_SIZE);

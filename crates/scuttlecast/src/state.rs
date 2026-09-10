@@ -22,9 +22,7 @@ pub enum LimitingFactor {
     SourceStarved {
         read_wait_ms: u32,
     },
-    /// A receiver cannot write what it is being sent as fast as it arrives.
-    /// Its socket backs up, which backs the sender's socket up in turn, so
-    /// without this the sender looks like its own bottleneck.
+    /// A receiver cannot write what it is being sent as fast as it arrives
     SinkStalled {
         receiver: u64,
         stall_ms: u32,
@@ -167,8 +165,7 @@ pub struct TransferState {
     pub blocks_per_second: f64,
     pub blocks_sent: u64,
     pub slices_emitted: u32,
-    /// Parity shards each slice now carries, which follows the loss the worst
-    /// receiver reports and costs nothing on a clean link
+    /// Parity shards each slice now carries
     pub parity_shards: u16,
     pub total_blocks: Option<u64>,
     pub draining: bool,
@@ -228,9 +225,6 @@ mod tests {
         );
     }
 
-    /// A receiver that cannot write fast enough backs up its own socket, and
-    /// the sender's socket behind it, so the sender looks like its own limit.
-    /// Naming the disk is the whole point of the report.
     #[test]
     fn a_receiver_that_cannot_write_outranks_the_senders_own_socket() {
         let bottleneck = Bottleneck {
@@ -259,8 +253,6 @@ mod tests {
         assert_eq!(bottleneck.attribute(), LimitingFactor::Unconstrained);
     }
 
-    /// Repairs cost throughput directly, and a receiver asking for them is
-    /// usually also the one whose sink is behind, so loss stays the headline.
     #[test]
     fn repairs_outrank_a_stalled_sink() {
         let bottleneck = Bottleneck {

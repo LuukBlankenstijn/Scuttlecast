@@ -48,16 +48,11 @@ impl Pacer {
         self.last_refill = now;
     }
 
-    /// Records that traffic was ready and the pacer made it wait, which is
-    /// what makes the allowance the constraint rather than the sender. A pass
-    /// spends only what the moment offers, so credit left over says nothing:
-    /// having had to wait for it does.
+    /// Records that traffic was ready and the pacer made it wait
     pub fn waited(&mut self) {
         self.waited = true;
     }
 
-    /// Whole blocks the pacer will allow right now, so a pass can take a batch
-    /// in one go rather than asking once per block
     pub fn budget(&self) -> usize {
         self.credit as usize
     }
@@ -403,8 +398,6 @@ mod tests {
         assert!(!pacer.take_starvation());
     }
 
-    /// Credit left unspent is not a sign the allowance was generous: a pass
-    /// spends only what was queued at that moment.
     #[tokio::test(start_paused = true)]
     async fn unspent_credit_is_not_a_wait() {
         let mut pacer = Pacer::new();

@@ -45,9 +45,6 @@ impl Message {
         }
     }
 
-    /// Writes the message into `buf` and returns how much of it was used, so
-    /// a sender can reuse one buffer for a whole transfer rather than
-    /// allocating per datagram.
     pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, Error> {
         Ok(bincode::encode_into_slice(self, buf, standard())?)
     }

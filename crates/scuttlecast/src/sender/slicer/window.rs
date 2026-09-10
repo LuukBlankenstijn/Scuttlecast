@@ -76,10 +76,8 @@ impl Window {
         Ok(window)
     }
 
-    /// Sets how many parity shards the slices sealed from now on carry, capped
-    /// by the maximum the transfer announced. Shard `j` comes out the same
-    /// whether two or twenty are asked for, so receivers go on decoding
-    /// against the announced maximum however little the sender is sending.
+    /// Parity shards the slices sealed from now on carry, capped by the
+    /// maximum the transfer announced
     pub(super) fn cover(&mut self, wanted: u16) -> Result<(), Error> {
         let wanted = (wanted as usize).min(self.max_parity);
         if wanted == self.parity {
@@ -432,10 +430,6 @@ mod tests {
         assert_eq!(window.shard(0, 0), Some(&full_block(1)));
     }
 
-    /// Receivers decode against the maximum the transfer announced whatever
-    /// the sender is currently sending, which only holds because shard `j` is
-    /// the same either way. A codec that stopped honouring that would corrupt
-    /// every reconstruction rather than fail, so it is worth pinning.
     #[test]
     fn a_shard_is_the_same_however_many_were_asked_for() {
         let mut wide = fec_window(4, 4, 8);

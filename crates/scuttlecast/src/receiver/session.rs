@@ -241,11 +241,7 @@ impl Session {
         self.request_gaps().await
     }
 
-    /// Hands over what the sink will take without ever waiting for it. A
-    /// receiver whose disk pauses has to keep reading its socket and keep
-    /// reporting, or the sender hears silence and evicts a machine that is
-    /// merely slow. Blocks the sink would not take stay here, and the
-    /// assembler holds the rest, so the sender's window is what slows down.
+    /// Hands over what the sink will take, never waiting for it
     fn hand_over(&mut self, sink: &mpsc::Sender<Bytes>) -> Result<(), ProtoError> {
         let now = Instant::now();
         if !self.pending.is_empty() {

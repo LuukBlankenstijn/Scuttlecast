@@ -82,8 +82,7 @@ async fn transfer_with_loss(
     received
 }
 
-/// Runs a transfer and reports every parity count the sender published while
-/// it ran, so a test can see the coverage follow the link.
+/// Every parity count the sender published while the transfer ran
 async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Losing) -> Vec<u16> {
     let group = common::group(group_id);
     let output = common::Output::new();
@@ -253,9 +252,7 @@ async fn recovers_from_parity_without_asking_for_anything() {
     }
 }
 
-/// Parity costs a quarter of the wire at its default width, so a link that
-/// never drops anything should stop paying for it. The transfer has to run
-/// long enough for a receiver to report a loss rate at all.
+/// Long enough for a receiver to report a loss rate at all
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clean_link_stops_carrying_parity() {
     let sent = common::payload(600 * BLOCK_SIZE);
@@ -269,8 +266,6 @@ async fn a_clean_link_stops_carrying_parity() {
     );
 }
 
-/// The reverse: a receiver dropping a tenth of the blocks needs shards, and
-/// the sender only learns that from what the receiver reports.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lossy_link_keeps_carrying_parity() {
     let sent = common::payload(600 * BLOCK_SIZE);

@@ -41,11 +41,7 @@ impl Slice {
             .all(|slot| slot.is_some())
     }
 
-    /// The lowest missing data blocks worth asking for: only as many as are
-    /// still needed to reach `target` recoverable shards, and never the
-    /// padding slots beyond a short final slice. Parity is never worth asking
-    /// for, since every shard still missing below `target` is a data block and
-    /// there are always at least as many of those as the shortfall.
+    /// The lowest missing data blocks worth asking for, capped by the shortfall
     fn wanted(&self, target: u16) -> Vec<u16> {
         let shortfall = (target as usize).saturating_sub(self.received as usize);
         self.slots

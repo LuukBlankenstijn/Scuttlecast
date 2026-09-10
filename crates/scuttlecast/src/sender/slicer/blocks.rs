@@ -1,15 +1,10 @@
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Read in one go rather than a block at a time, and carve the blocks out of
-/// what arrived. Files and stdin are both served by the blocking thread pool,
-/// so a block-sized read costs a task hand-off to another thread and back,
-/// which dwarfs the read.
+/// Read in one go: files and stdin are served by the blocking thread pool
 const READ_AHEAD: usize = 1 << 20;
 
-/// Blocks share the allocation they were read into. A block lives until the
-/// retransmit window lets it go, so allocating each one separately leaves the
-/// allocator coalescing thousands of block-sized holes.
+/// Blocks share the allocation they were read into
 pub(crate) fn split<R: AsyncRead + Unpin>(
     mut reader: R,
     block_size: usize,

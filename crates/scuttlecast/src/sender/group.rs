@@ -190,11 +190,8 @@ impl Group {
             .map(|(receiver_id, participant)| (*receiver_id, self.slices_behind(participant)))
     }
 
-    /// The wire loss the worst-placed receiver is seeing, once a window has
-    /// carried enough transmissions to mean anything. One parity stream serves
-    /// the whole group, so it has to cover the receiver losing most. This is
-    /// loss before any repair, so parity absorbing it does not hide the reason
-    /// the parity is there.
+    /// Wire loss of the worst-placed receiver, before any repair, once a
+    /// window has carried enough transmissions to mean anything
     pub fn worst_loss(&self) -> Option<f64> {
         self.participants
             .values()
@@ -202,10 +199,7 @@ impl Group {
             .reduce(f64::max)
     }
 
-    /// The receiver that spent the most of its last reporting window unable to
-    /// write what it had received. A receiver that cannot keep up backs its own
-    /// socket up, and the sender's socket behind it, so this is the difference
-    /// between blaming a slow disk and blaming the sender.
+    /// The receiver that spent the most of its last window unable to write
     pub fn worst_sink_stall(&self) -> Option<(u64, u32)> {
         self.participants
             .iter()
