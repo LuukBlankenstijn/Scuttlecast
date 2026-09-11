@@ -37,12 +37,12 @@ pub fn send_segmented(
         header.msg_iov = &mut iov;
         header.msg_iovlen = 1;
         header.msg_control = control.0.as_mut_ptr().cast();
-        header.msg_controllen = segment_size_space();
+        header.msg_controllen = segment_size_space() as _;
 
         let cmsg = libc::CMSG_FIRSTHDR(&header);
         (*cmsg).cmsg_level = libc::IPPROTO_UDP;
         (*cmsg).cmsg_type = libc::UDP_SEGMENT;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<u16>() as libc::c_uint) as libc::size_t;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<u16>() as libc::c_uint) as _;
         ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<u16>(), segment_size as u16);
 
         libc::sendmsg(fd, &header, 0)
@@ -86,7 +86,7 @@ pub fn recv_coalesced(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, Option<us
         header.msg_iov = &mut iov;
         header.msg_iovlen = 1;
         header.msg_control = control.0.as_mut_ptr().cast();
-        header.msg_controllen = control.0.len() as libc::size_t;
+        header.msg_controllen = control.0.len() as _;
 
         let received = libc::recvmsg(fd, &mut header, 0);
         if received < 0 {
