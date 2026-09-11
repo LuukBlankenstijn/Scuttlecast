@@ -85,7 +85,7 @@ async fn transfer_with_loss(
 }
 
 /// Every parity count the sender published while the transfer ran
-async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Losing) -> Vec<u16> {
+async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Losing) -> Vec<u8> {
     let group = common::group(group_id);
     let output = common::Output::new();
     let path = output.path("receiver.bin");

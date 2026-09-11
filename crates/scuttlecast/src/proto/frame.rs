@@ -15,6 +15,7 @@ const UDP_MAX_SEGMENTS: usize = 128;
 #[derive(Debug, PartialEq)]
 pub struct Frame {
     pub slot: u16,
+    pub slice_parity: u8,
     pub transfer_id: u32,
     pub seq: u32,
     pub slice_no: u32,
@@ -27,6 +28,7 @@ impl Frame {
         let mut header = [0u8; HEADER_SIZE];
 
         header[0] = FRAME_TAG;
+        header[1] = self.slice_parity;
         header[2..4].copy_from_slice(&self.slot.to_le_bytes());
         header[4..8].copy_from_slice(&self.transfer_id.to_le_bytes());
         header[8..12].copy_from_slice(&self.seq.to_le_bytes());
@@ -43,15 +45,13 @@ impl Frame {
         if datagram[0] != FRAME_TAG {
             return Err(Error::UnknownTag(datagram[0]));
         }
-        if datagram[1] != 0 {
-            return Err(Error::ReservedFlags(datagram[1]));
-        }
 
         let field =
             |at: usize| u32::from_le_bytes(datagram[at..at + 4].try_into().expect("four bytes"));
 
         Ok(Self {
             slot: u16::from_le_bytes(datagram[2..4].try_into().expect("two bytes")),
+            slice_parity: datagram[1],
             transfer_id: field(4),
             seq: field(8),
             slice_no: field(12),
@@ -125,7 +125,7 @@ fn segments_per_datagram(segment_size: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTROL_TAG, FRAME_TAG, Frame, FrameBatch, HEADER_SIZE, segments_per_datagram};
+    use super::{CONTROL_TAG, Frame, FrameBatch, HEADER_SIZE, segments_per_datagram};
     use crate::proto::error::Error;
     use bytes::Bytes;
     use proptest::prelude::*;
@@ -135,6 +135,7 @@ mod tests {
     fn frame(slot: u16, payload: Bytes) -> Frame {
         Frame {
             slot,
+            slice_parity: 8,
             transfer_id: 0xdead_beef,
             seq: 0x0102_0304,
             slice_no: 9,
@@ -154,6 +155,7 @@ mod tests {
         #[test]
         fn roundtrips_through_a_datagram(
             slot: u16,
+            slice_parity: u8,
             transfer_id: u32,
             seq: u32,
             slice_no: u32,
@@ -162,6 +164,7 @@ mod tests {
         ) {
             let original = Frame {
                 slot,
+                slice_parity,
                 transfer_id,
                 seq,
                 slice_no,
@@ -175,6 +178,7 @@ mod tests {
         #[test]
         fn a_header_is_the_same_width_whatever_it_carries(
             slot: u16,
+            slice_parity: u8,
             transfer_id: u32,
             seq: u32,
             slice_no: u32,
@@ -183,6 +187,7 @@ mod tests {
             let payload = Bytes::from_static(b"x");
             let written = datagram_of(&Frame {
                 slot,
+                slice_parity,
                 transfer_id,
                 seq,
                 slice_no,
@@ -213,15 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_flags() {
-        let mut datagram = vec![0u8; HEADER_SIZE + 4];
-        datagram[0] = FRAME_TAG;
-        datagram[1] = 1;
+    fn a_shard_names_the_parity_its_slice_carries() {
+        let staged = datagram_of(&frame(3, Bytes::from_static(b"payload")));
 
-        assert!(matches!(
-            Frame::parse(Bytes::from(datagram)),
-            Err(Error::ReservedFlags(1))
-        ));
+        assert_eq!(Frame::parse(staged).expect("parses").slice_parity, 8);
     }
 
     #[test]

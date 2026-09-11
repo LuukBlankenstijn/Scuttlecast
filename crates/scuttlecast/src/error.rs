@@ -12,7 +12,7 @@ pub enum ProtoError {
     Protocol(#[from] crate::proto::Error),
 
     #[error("invalid erasure-coding configuration: {0}")]
-    Fec(#[from] reed_solomon_erasure::Error),
+    Fec(#[from] reed_solomon_simd::Error),
 
     #[error("Timeout: {0}")]
     Timeout(String),

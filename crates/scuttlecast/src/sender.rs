@@ -41,7 +41,7 @@ const SOURCE_WAIT_FLOOR: Duration = Duration::from_millis(TICK_INTERVAL.as_milli
 
 /// A sink waiting this much of a reporting window cannot keep up
 const SINK_STALL_FLOOR: u32 = STATS_INTERVAL.as_millis() as u32 / 4;
-const DEFAULT_PARITY_PER_SLICE: u16 = 8;
+const DEFAULT_PARITY_PER_SLICE: u8 = 8;
 
 const OUTBOUND_CAPACITY: usize = 4096;
 
@@ -63,7 +63,7 @@ pub struct Sender {
     #[builder(default = DEFAULT_MAX_LIVE_SLICES)]
     max_live_slices: NonZeroU16,
     #[builder(default = DEFAULT_PARITY_PER_SLICE)]
-    parity_per_slice: u16,
+    parity_per_slice: u8,
     #[builder(default = DEFAULT_BLOCK_SIZE)]
     block_size: NonZeroU32,
     #[builder(default = UNCAPPED_BATCH_SEGMENTS)]
@@ -171,10 +171,11 @@ impl Sender {
 
                     for outbound in queued.drain(..) {
                         match outbound {
-                            Outbound::Shard { slice_no, slot, emit_floor, payload } => {
+                            Outbound::Shard { slice_no, slot, slice_parity, emit_floor, payload } => {
                                 pacer.consume();
                                 batch.push(&Frame {
                                     slot,
+                                    slice_parity,
                                     transfer_id: transfer_id as u32,
                                     seq,
                                     slice_no,
@@ -396,13 +397,13 @@ impl Sender {
 
 /// Parity shards covering the loss the worst receiver reports, or the full
 /// width while no receiver has measured one yet
-fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u16) -> u16 {
+fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u8) -> u8 {
     let Some(loss) = loss else {
         return max_parity;
     };
 
     let shards = loss * blocks_per_slice.get() as f64 * PARITY_HEADROOM;
-    (shards.ceil() as u16).min(max_parity)
+    (shards.ceil() as u8).min(max_parity)
 }
 
 #[cfg(test)]

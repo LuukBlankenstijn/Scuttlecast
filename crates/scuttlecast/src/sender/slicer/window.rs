@@ -2,21 +2,20 @@ use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
 
 use bytes::Bytes;
-use reed_solomon_erasure::Error;
-use reed_solomon_erasure::galois_8::ReedSolomon;
-
-const MAX_SHARDS_PER_SLICE: usize = 255;
+use reed_solomon_simd::{Error, ReedSolomonEncoder};
 
 struct Slice {
     slice_no: u32,
+    parity_width: usize,
     data: Vec<Bytes>,
     parity: Vec<Bytes>,
 }
 
 impl Slice {
-    fn empty(slice_no: u32) -> Self {
+    fn empty(slice_no: u32, parity_width: usize) -> Self {
         Self {
             slice_no,
+            parity_width,
             data: Vec::new(),
             parity: Vec::new(),
         }
@@ -42,9 +41,10 @@ pub(super) struct Window {
     block_size: usize,
     blocks_per_slice: usize,
     max_parity: usize,
-    parity: usize,
+    wanted_parity: usize,
     max_live_slices: usize,
-    codec: Option<ReedSolomon>,
+    codec: Option<ReedSolomonEncoder>,
+    codec_width: usize,
     live: VecDeque<Slice>,
     current: Slice,
 }
@@ -53,45 +53,46 @@ impl Window {
     pub(super) fn new(
         block_size: usize,
         blocks_per_slice: NonZeroU16,
-        max_parity: u16,
+        max_parity: u8,
         max_live_slices: NonZeroUsize,
     ) -> Result<Self, Error> {
         let blocks_per_slice = blocks_per_slice.get() as usize;
         let max_parity = max_parity as usize;
-        if blocks_per_slice + max_parity > MAX_SHARDS_PER_SLICE {
-            return Err(Error::TooManyShards);
-        }
+        let codec = match max_parity {
+            0 => None,
+            parity => Some(ReedSolomonEncoder::new(
+                blocks_per_slice,
+                parity,
+                block_size,
+            )?),
+        };
 
-        let mut window = Self {
+        Ok(Self {
             block_size,
             blocks_per_slice,
             max_parity,
-            parity: 0,
+            wanted_parity: max_parity,
             max_live_slices: max_live_slices.get(),
-            codec: None,
+            codec,
+            codec_width: max_parity,
             live: VecDeque::new(),
-            current: Slice::empty(0),
-        };
-        window.cover(max_parity as u16)?;
-
-        Ok(window)
+            current: Slice::empty(0, max_parity),
+        })
     }
 
-    /// Parity shards the slices sealed from now on carry, capped by the
-    /// maximum the transfer announced
-    pub(super) fn cover(&mut self, wanted: u16) -> Result<(), Error> {
-        let wanted = (wanted as usize).min(self.max_parity);
-        if wanted == self.parity {
-            return Ok(());
-        }
+    /// Parity shards the slices started from now on carry, capped by the
+    /// maximum the transfer announced. A slice keeps the width it was created
+    /// with, so that every shard of it can name the same one.
+    pub(super) fn cover(&mut self, wanted: u8) {
+        self.wanted_parity = (wanted as usize).min(self.max_parity);
+    }
 
-        self.codec = match wanted {
-            0 => None,
-            parity => Some(ReedSolomon::new(self.blocks_per_slice, parity)?),
-        };
-        self.parity = wanted;
+    pub(super) fn current_parity(&self) -> u8 {
+        self.current.parity_width as u8
+    }
 
-        Ok(())
+    pub(super) fn slice_parity(&self, slice_no: u32) -> Option<u8> {
+        self.slice(slice_no).map(|slice| slice.parity_width as u8)
     }
 
     pub(super) fn is_full(&self) -> bool {
@@ -127,7 +128,7 @@ impl Window {
         self.current.parity = self.encode_parity();
         let slice_no = self.current.slice_no;
         let parity = self.current.parity.clone();
-        let next = Slice::empty(slice_no + 1);
+        let next = Slice::empty(slice_no + 1, self.wanted_parity);
         self.live
             .push_back(std::mem::replace(&mut self.current, next));
 
@@ -147,11 +148,7 @@ impl Window {
     /// Serves any shard of a slice by slot: data blocks occupy `0..k`, parity
     /// shards `k..k + m`.
     pub(super) fn shard(&self, slice_no: u32, slot: u16) -> Option<&Bytes> {
-        let slice = if self.current.slice_no == slice_no {
-            &self.current
-        } else {
-            self.live.iter().find(|slice| slice.slice_no == slice_no)?
-        };
+        let slice = self.slice(slice_no)?;
 
         let slot = slot as usize;
         if slot < self.blocks_per_slice {
@@ -161,36 +158,59 @@ impl Window {
         }
     }
 
-    fn encode_parity(&self) -> Vec<Bytes> {
-        let Some(codec) = &self.codec else {
-            return Vec::new();
-        };
-
-        let mut parity = vec![vec![0u8; self.block_size]; self.parity];
-
-        if self.current.data.len() == self.blocks_per_slice {
-            codec.encode_sep(&self.current.data, &mut parity)
-        } else {
-            let absent = vec![0u8; self.block_size];
-            let data: Vec<&[u8]> = (0..self.blocks_per_slice)
-                .map(|slot| {
-                    self.current
-                        .data
-                        .get(slot)
-                        .map_or(&absent[..], |block| &block[..])
-                })
-                .collect();
-            codec.encode_sep(&data, &mut parity)
+    fn slice(&self, slice_no: u32) -> Option<&Slice> {
+        if self.current.slice_no == slice_no {
+            return Some(&self.current);
         }
-        .expect("k data and m parity shards of equal length");
 
-        parity.into_iter().map(Bytes::from).collect()
+        self.live.iter().find(|slice| slice.slice_no == slice_no)
+    }
+
+    fn encode_parity(&mut self) -> Vec<Bytes> {
+        let width = self.current.parity_width;
+        if width == 0 {
+            return Vec::new();
+        }
+
+        let blocks_per_slice = self.blocks_per_slice;
+        let absent = vec![0u8; self.block_size];
+        if self.codec_width != width {
+            self.codec
+                .as_mut()
+                .expect("a transfer allowing parity built a codec")
+                .reset(blocks_per_slice, width, self.block_size)
+                .expect("a narrower slice than the widest the transfer allows");
+            self.codec_width = width;
+        }
+
+        let codec = self
+            .codec
+            .as_mut()
+            .expect("a transfer allowing parity built a codec");
+        for slot in 0..blocks_per_slice {
+            let block = self
+                .current
+                .data
+                .get(slot)
+                .map_or(&absent[..], |block| &block[..]);
+
+            codec
+                .add_original_shard(block)
+                .expect("a slice never holds more blocks than it was sized for");
+        }
+
+        codec
+            .encode()
+            .expect("every block of the slice was added")
+            .recovery_iter()
+            .map(Bytes::copy_from_slice)
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Pushed, Window};
+    use super::{Pushed, Sealed, Window};
     use bytes::Bytes;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -200,7 +220,7 @@ mod tests {
         fec_window(blocks_per_slice, 0, max_live_slices)
     }
 
-    fn fec_window(blocks_per_slice: u16, parity_per_slice: u16, max_live_slices: usize) -> Window {
+    fn fec_window(blocks_per_slice: u16, parity_per_slice: u8, max_live_slices: usize) -> Window {
         Window::new(
             BLOCK_SIZE,
             NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
@@ -366,11 +386,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_shard_budget_over_the_field_limit() {
+    fn rejects_a_shard_budget_the_codec_cannot_serve() {
         let result = Window::new(
             BLOCK_SIZE,
-            NonZeroU16::new(250).expect("blocks per slice"),
-            6,
+            NonZeroU16::new(u16::MAX).expect("blocks per slice"),
+            u8::MAX,
             NonZeroUsize::new(8).expect("max live slices"),
         );
 
@@ -387,57 +407,58 @@ mod tests {
         assert_eq!(window.shard(0, 2), None);
     }
 
-    #[test]
-    fn covering_less_seals_fewer_shards() {
-        let mut window = fec_window(2, 4, 8);
-        window.cover(1).expect("cover");
-
+    fn seal_two_slices(window: &mut Window) -> (Sealed, Sealed) {
         window.push(full_block(1));
-        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+        let first = window.push(full_block(2)).sealed.expect("first sealed");
+        window.push(full_block(3));
+        let second = window.push(full_block(4)).sealed.expect("second sealed");
 
-        assert_eq!(sealed.parity.len(), 1);
+        (first, second)
+    }
+
+    #[test]
+    fn covering_less_takes_effect_on_the_slice_after_the_one_being_filled() {
+        let mut window = fec_window(2, 4, 8);
+        window.cover(1);
+
+        let (first, second) = seal_two_slices(&mut window);
+
+        assert_eq!(first.parity.len(), 4);
+        assert_eq!(second.parity.len(), 1);
     }
 
     #[test]
     fn covering_more_than_the_transfer_announced_is_capped() {
         let mut window = fec_window(2, 2, 8);
-        window.cover(50).expect("cover");
+        window.cover(50);
 
-        window.push(full_block(1));
-        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+        let (_, second) = seal_two_slices(&mut window);
 
-        assert_eq!(sealed.parity.len(), 2);
+        assert_eq!(second.parity.len(), 2);
     }
 
     #[test]
     fn covering_nothing_stops_parity_without_disturbing_the_slices() {
         let mut window = fec_window(2, 2, 8);
-        window.cover(0).expect("cover");
+        window.cover(0);
 
-        window.push(full_block(1));
-        let sealed = window.push(full_block(2)).sealed.expect("sealed");
+        let (first, second) = seal_two_slices(&mut window);
 
-        assert!(sealed.parity.is_empty());
+        assert_eq!(first.parity.len(), 2);
+        assert!(second.parity.is_empty());
         assert_eq!(window.shard(0, 0), Some(&full_block(1)));
     }
 
     #[test]
-    fn a_shard_is_the_same_however_many_were_asked_for() {
-        let mut wide = fec_window(4, 4, 8);
-        let mut narrow = fec_window(4, 4, 8);
-        narrow.cover(1).expect("cover");
+    fn every_shard_of_a_slice_names_the_width_the_slice_was_created_with() {
+        let mut window = fec_window(2, 4, 8);
+        window.cover(1);
 
-        let mut wide_sealed = None;
-        let mut narrow_sealed = None;
-        for byte in 1..=4 {
-            wide_sealed = wide.push(full_block(byte)).sealed;
-            narrow_sealed = narrow.push(full_block(byte)).sealed;
-        }
+        assert_eq!(window.current_parity(), 4);
+        seal_two_slices(&mut window);
 
-        let wide = wide_sealed.expect("sealed");
-        let narrow = narrow_sealed.expect("sealed");
-
-        assert_eq!(wide.parity.len(), 4);
-        assert_eq!(narrow.parity, wide.parity[..1]);
+        assert_eq!(window.slice_parity(0), Some(4));
+        assert_eq!(window.slice_parity(1), Some(1));
+        assert_eq!(window.slice_parity(9), None);
     }
 }

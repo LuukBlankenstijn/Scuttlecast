@@ -167,7 +167,7 @@ pub struct TransferState {
     pub blocks_sent: u64,
     pub slices_emitted: u32,
     /// Parity shards each slice now carries
-    pub parity_shards: u16,
+    pub parity_shards: u8,
     pub total_blocks: Option<u64>,
     pub draining: bool,
     pub limiting: LimitingFactor,

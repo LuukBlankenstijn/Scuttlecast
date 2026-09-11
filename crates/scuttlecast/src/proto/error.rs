@@ -14,12 +14,15 @@ pub enum Error {
     #[error("datagram tagged {0:#04x} is neither a shard nor a control message")]
     UnknownTag(u8),
 
-    #[error("shard header sets reserved flags {0:#04x}")]
-    ReservedFlags(u8),
-
     #[error("shard payload of {got} bytes in a transfer of {expected}-byte blocks")]
     PayloadSize { got: usize, expected: usize },
 
     #[error("slot {slot} is out of range for slices of {slots} shards")]
     SlotOutsideSlice { slot: u16, slots: u16 },
+
+    #[error("shard names {named} parity shards in a transfer allowing {allowed}")]
+    ParityWiderThanTransfer { named: u8, allowed: u8 },
+
+    #[error("parity slot {slot} lies outside a slice of {named} parity shards")]
+    ParityOutsideSlice { slot: u16, named: u8 },
 }

@@ -48,6 +48,7 @@ async fn rejects_a_slot_outside_its_slice() {
     rogue
         .send_frame(&Frame {
             slot: 32,
+            slice_parity: 0,
             transfer_id: 1,
             seq: 0,
             slice_no: 0,
@@ -68,6 +69,82 @@ async fn rejects_a_slot_outside_its_slice() {
                 slot: 32,
                 slots
             })) if slots == 32
+        ),
+        "got {result:?}"
+    );
+}
+
+/// A shard names the parity its slice carries, and reconstructing against the
+/// wrong width returns the wrong bytes without reporting anything, so a width
+/// the transfer never allowed is refused before it reaches the codec.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_a_parity_width_the_transfer_never_allowed() {
+    let (rogue, receiving, _output) = receive_one_transfer(82, 19020).await;
+
+    rogue.send(Message::Hello(hello(3, 32))).await;
+    rogue
+        .send_frame(&Frame {
+            slot: 0,
+            slice_parity: u8::MAX,
+            transfer_id: 3,
+            seq: 0,
+            slice_no: 0,
+            emit_floor: 0,
+            payload: Bytes::from(vec![1; scuttlecast::DEFAULT_BLOCK_SIZE as usize]),
+        })
+        .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), receiving)
+        .await
+        .expect("receiver finished")
+        .expect("receiver did not panic");
+
+    assert!(
+        matches!(
+            result,
+            Err(ProtoError::Protocol(
+                scuttlecast::proto::Error::ParityWiderThanTransfer {
+                    named: u8::MAX,
+                    allowed: 0
+                }
+            ))
+        ),
+        "got {result:?}"
+    );
+}
+
+/// A parity slot outside the width its own shard names would address a
+/// recovery shard the codec was never configured for
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_a_parity_slot_outside_the_width_it_names() {
+    let (rogue, receiving, _output) = receive_one_transfer(83, 19030).await;
+
+    let mut announcement = hello(4, 32);
+    announcement.parity_per_slice = 8;
+    rogue.send(Message::Hello(announcement)).await;
+    rogue
+        .send_frame(&Frame {
+            slot: 35,
+            slice_parity: 1,
+            transfer_id: 4,
+            seq: 0,
+            slice_no: 0,
+            emit_floor: 0,
+            payload: Bytes::from(vec![1; scuttlecast::DEFAULT_BLOCK_SIZE as usize]),
+        })
+        .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), receiving)
+        .await
+        .expect("receiver finished")
+        .expect("receiver did not panic");
+
+    assert!(
+        matches!(
+            result,
+            Err(ProtoError::Protocol(
+                scuttlecast::proto::Error::ParityOutsideSlice { slot: 35, named: 1 }
+            ))
         ),
         "got {result:?}"
     );

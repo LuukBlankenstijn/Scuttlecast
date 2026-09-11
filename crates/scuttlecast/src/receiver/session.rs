@@ -58,6 +58,8 @@ pub(super) struct Session {
     transfer_id: u64,
     receiver_id: u64,
     block_size: usize,
+    blocks_per_slice: u16,
+    parity_per_slice: u8,
     assembler: Assembler,
     naks: Naks,
     pending: VecDeque<Bytes>,
@@ -80,21 +82,23 @@ impl Session {
         sender: SocketAddr,
         receiver_id: u64,
         hello: &Hello,
-    ) -> Self {
+    ) -> Result<Self, ProtoError> {
         let block_size = hello.block_size.get() as usize;
 
-        Self {
+        Ok(Self {
             socket,
             sender,
             transfer_id: hello.transfer_id,
             receiver_id,
             block_size,
+            blocks_per_slice: hello.blocks_per_slice.get(),
+            parity_per_slice: hello.parity_per_slice,
             assembler: Assembler::new(
                 block_size,
                 hello.blocks_per_slice,
                 hello.parity_per_slice,
                 hello.max_live_slices,
-            ),
+            )?,
             naks: Naks::default(),
             pending: VecDeque::new(),
             emit_floor: 0,
@@ -108,7 +112,7 @@ impl Session {
             sink_stall: Duration::ZERO,
             last_handover: Instant::now(),
             last_packet: Instant::now(),
-        }
+        })
     }
 
     pub(super) async fn run(
@@ -193,10 +197,12 @@ impl Session {
         let floor_advanced = frame.emit_floor > self.emit_floor;
         self.emit_floor = self.emit_floor.max(frame.emit_floor);
 
-        if !self
-            .assembler
-            .insert(frame.slice_no, frame.slot, frame.payload)
-        {
+        if !self.assembler.insert(
+            frame.slice_no,
+            frame.slot,
+            frame.slice_parity,
+            frame.payload,
+        ) {
             self.refused(frame.slice_no);
         }
 
@@ -212,6 +218,20 @@ impl Session {
             return Err(ProtocolError::SlotOutsideSlice {
                 slot: frame.slot,
                 slots,
+            });
+        }
+        if frame.slice_parity > self.parity_per_slice {
+            return Err(ProtocolError::ParityWiderThanTransfer {
+                named: frame.slice_parity,
+                allowed: self.parity_per_slice,
+            });
+        }
+        if let Some(index) = frame.slot.checked_sub(self.blocks_per_slice)
+            && index >= frame.slice_parity as u16
+        {
+            return Err(ProtocolError::ParityOutsideSlice {
+                slot: frame.slot,
+                named: frame.slice_parity,
             });
         }
         if frame.payload.len() != self.block_size {

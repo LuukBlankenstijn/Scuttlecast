@@ -94,6 +94,7 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
 
     let shard = Frame {
         slot: 0,
+        slice_parity: 0,
         transfer_id: transfer_id as u32,
         seq: 0,
         slice_no: 0,

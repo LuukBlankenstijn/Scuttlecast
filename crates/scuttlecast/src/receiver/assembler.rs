@@ -2,13 +2,12 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
 use bytes::Bytes;
-use reed_solomon_erasure::galois_8::ReedSolomon;
-
-const MAX_SHARDS_PER_SLICE: usize = 255;
+use reed_solomon_simd::{Error, ReedSolomonDecoder};
 
 struct Slice {
     slots: Vec<Option<Bytes>>,
     received: u16,
+    parity_width: u8,
 }
 
 impl Slice {
@@ -16,19 +15,29 @@ impl Slice {
         Self {
             slots: vec![None; total_slots as usize],
             received: 0,
+            parity_width: 0,
         }
     }
 
-    fn insert(&mut self, slot: u16, payload: Bytes) -> bool {
+    /// A slice is reconstructed against the width its shards name, so a shard
+    /// naming a different one is refused rather than allowed to contradict
+    /// what is already stored under the first.
+    fn insert(&mut self, slot: u16, parity_width: u8, payload: Bytes) -> bool {
         let Some(cell) = self.slots.get_mut(slot as usize) else {
             return false;
         };
         if cell.is_some() {
             return false;
         }
+        if parity_width > 0 && self.parity_width > 0 && self.parity_width != parity_width {
+            return false;
+        }
 
         *cell = Some(payload);
         self.received += 1;
+        if parity_width > 0 {
+            self.parity_width = parity_width;
+        }
         true
     }
 
@@ -56,39 +65,49 @@ impl Slice {
 pub(super) struct Assembler {
     block_size: usize,
     blocks_per_slice: u16,
-    parity_per_slice: u16,
+    parity_per_slice: u8,
     max_live_slices: u32,
-    codec: Option<ReedSolomon>,
+    codec: Option<ReedSolomonDecoder>,
+    codec_width: u8,
     slices: BTreeMap<u32, Slice>,
     next_needed: u32,
     total_blocks: Option<u64>,
 }
 
 impl Assembler {
+    /// Builds the decoder for the widest parity the transfer allows, so that
+    /// an announcement the codec cannot serve is refused here rather than
+    /// when a slice first needs repairing.
     pub(super) fn new(
         block_size: usize,
         blocks_per_slice: NonZeroU16,
-        parity_per_slice: u16,
+        parity_per_slice: u8,
         max_live_slices: NonZeroU16,
-    ) -> Self {
-        let blocks_per_slice = blocks_per_slice.get();
-        let codec = fec_codec(blocks_per_slice, parity_per_slice);
-        let parity_per_slice = if codec.is_some() { parity_per_slice } else { 0 };
+    ) -> Result<Self, Error> {
+        let codec = match parity_per_slice {
+            0 => None,
+            parity => Some(ReedSolomonDecoder::new(
+                blocks_per_slice.get() as usize,
+                parity as usize,
+                block_size,
+            )?),
+        };
 
-        Self {
+        Ok(Self {
             block_size,
-            blocks_per_slice,
+            blocks_per_slice: blocks_per_slice.get(),
             parity_per_slice,
             max_live_slices: max_live_slices.get() as u32,
             codec,
+            codec_width: parity_per_slice,
             slices: BTreeMap::new(),
             next_needed: 0,
             total_blocks: None,
-        }
+        })
     }
 
     pub(super) fn total_slots(&self) -> u16 {
-        self.blocks_per_slice + self.parity_per_slice
+        self.blocks_per_slice + self.parity_per_slice as u16
     }
 
     pub(super) fn next_needed(&self) -> u32 {
@@ -112,7 +131,13 @@ impl Assembler {
     /// Returns true if the shard was newly stored. Shards already written out,
     /// shards too far ahead to buffer, and duplicates are all refused. Data
     /// blocks land in slots `0..k`, parity shards in `k..k + m`.
-    pub(super) fn insert(&mut self, slice_no: u32, slot: u16, payload: Bytes) -> bool {
+    pub(super) fn insert(
+        &mut self,
+        slice_no: u32,
+        slot: u16,
+        parity_width: u8,
+        payload: Bytes,
+    ) -> bool {
         if slice_no < self.next_needed || slice_no >= self.next_needed + self.max_live_slices {
             return false;
         }
@@ -121,7 +146,7 @@ impl Assembler {
         self.slices
             .entry(slice_no)
             .or_insert_with(|| Slice::empty(total_slots))
-            .insert(slot, payload)
+            .insert(slot, parity_width, payload)
     }
 
     /// A slice that had to be reconstructed may only be written once its true
@@ -184,43 +209,62 @@ impl Assembler {
             .is_some_and(|slice| slice.received >= self.target(slice_no))
     }
 
-    fn recover(&self, slice: Slice, target: u16) -> Vec<Bytes> {
+    fn recover(&mut self, slice: Slice, target: u16) -> Vec<Bytes> {
         let target = target as usize;
-        let reconstruct = self.codec.is_some() && !slice.data_present(target as u16);
-        if !reconstruct {
+        if slice.data_present(target as u16) {
             return slice.slots.into_iter().take(target).flatten().collect();
         }
 
-        let codec = self
-            .codec
-            .as_ref()
-            .expect("codec present when reconstructing");
         let blocks_per_slice = self.blocks_per_slice as usize;
-        let mut shards: Vec<Option<Vec<u8>>> = slice
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(slot, held)| match held {
-                Some(payload) => Some(payload.to_vec()),
-                None if (target..blocks_per_slice).contains(&slot) => {
-                    Some(vec![0u8; self.block_size])
-                }
-                None => None,
-            })
-            .collect();
+        let absent = vec![0u8; self.block_size];
+        let codec = self.decoder_for(slice.parity_width);
 
-        codec
-            .reconstruct_data(&mut shards)
+        for (slot, held) in slice.slots.iter().enumerate() {
+            match held {
+                Some(payload) if slot < blocks_per_slice => codec.add_original_shard(slot, payload),
+                Some(payload) => codec.add_recovery_shard(slot - blocks_per_slice, payload),
+                None if (target..blocks_per_slice).contains(&slot) => {
+                    codec.add_original_shard(slot, &absent)
+                }
+                None => Ok(()),
+            }
+            .expect("every shard addresses a slot of this slice exactly once");
+        }
+
+        let mut recovered: Vec<Option<Bytes>> = slice.slots.iter().take(target).cloned().collect();
+        let decoded = codec
+            .decode()
             .expect("target shards present guarantees the data recovers");
 
-        (0..target)
-            .map(|slot| match &slice.slots[slot] {
-                Some(payload) => payload.clone(),
-                None => {
-                    Bytes::copy_from_slice(shards[slot].as_ref().expect("data shard recovered"))
-                }
-            })
+        for (slot, shard) in decoded.restored_original_iter() {
+            if slot < target {
+                recovered[slot] = Some(Bytes::copy_from_slice(shard));
+            }
+        }
+        drop(decoded);
+
+        recovered
+            .into_iter()
+            .map(|block| block.expect("every data shard of the slice recovered"))
             .collect()
+    }
+
+    /// Recovery shards depend on how many of them a slice was encoded with, so
+    /// a decoder is only valid for slices of that same width.
+    fn decoder_for(&mut self, parity_width: u8) -> &mut ReedSolomonDecoder {
+        if self.codec.is_none() || self.codec_width != parity_width {
+            self.codec = ReedSolomonDecoder::new(
+                self.blocks_per_slice as usize,
+                parity_width as usize,
+                self.block_size,
+            )
+            .ok();
+            self.codec_width = parity_width;
+        }
+
+        self.codec
+            .as_mut()
+            .expect("the widest parity the transfer allows built a decoder")
     }
 
     /// Every slice holds `blocks_per_slice` blocks except the last, whose size
@@ -239,22 +283,12 @@ impl Assembler {
     }
 }
 
-fn fec_codec(blocks_per_slice: u16, parity_per_slice: u16) -> Option<ReedSolomon> {
-    if parity_per_slice == 0
-        || blocks_per_slice as usize + parity_per_slice as usize > MAX_SHARDS_PER_SLICE
-    {
-        return None;
-    }
-
-    ReedSolomon::new(blocks_per_slice as usize, parity_per_slice as usize).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::Assembler;
     const BLOCK_SIZE: usize = crate::DEFAULT_BLOCK_SIZE as usize;
     use bytes::Bytes;
-    use reed_solomon_erasure::galois_8::ReedSolomon;
+    use reed_solomon_simd::ReedSolomonEncoder;
     use std::num::NonZeroU16;
 
     fn assembler(blocks_per_slice: u16, max_live_slices: u16) -> Assembler {
@@ -263,7 +297,7 @@ mod tests {
 
     fn fec_assembler(
         blocks_per_slice: u16,
-        parity_per_slice: u16,
+        parity_per_slice: u8,
         max_live_slices: u16,
     ) -> Assembler {
         Assembler::new(
@@ -272,6 +306,7 @@ mod tests {
             parity_per_slice,
             NonZeroU16::new(max_live_slices).expect("max live slices"),
         )
+        .expect("valid shard counts")
     }
 
     fn block(n: u8) -> Bytes {
@@ -280,7 +315,7 @@ mod tests {
 
     fn fill(assembler: &mut Assembler, slice_no: u32, blocks: u16) {
         for block_in_slice in 0..blocks {
-            assembler.insert(slice_no, block_in_slice, block(block_in_slice as u8));
+            assembler.insert(slice_no, block_in_slice, 0, block(block_in_slice as u8));
         }
     }
 
@@ -299,22 +334,28 @@ mod tests {
         parity_per_slice: usize,
         data: &[Vec<u8>],
     ) -> Vec<Vec<u8>> {
-        let codec = ReedSolomon::new(blocks_per_slice, parity_per_slice).expect("codec");
-        let mut parity = vec![vec![0u8; BLOCK_SIZE]; parity_per_slice];
+        let mut codec =
+            ReedSolomonEncoder::new(blocks_per_slice, parity_per_slice, BLOCK_SIZE).expect("codec");
+        for shard in data {
+            codec.add_original_shard(shard).expect("add shard");
+        }
+
         codec
-            .encode_sep(data, parity.as_mut_slice())
-            .expect("encode");
-        parity
+            .encode()
+            .expect("encode")
+            .recovery_iter()
+            .map(<[u8]>::to_vec)
+            .collect()
     }
 
     #[test]
     fn holds_a_slice_until_every_block_arrives() {
         let mut assembler = assembler(2, 8);
 
-        assembler.insert(0, 1, block(1));
+        assembler.insert(0, 1, 0, block(1));
         assert!(assembler.take_ready().is_empty());
 
-        assembler.insert(0, 0, block(0));
+        assembler.insert(0, 0, 0, block(0));
 
         assert_eq!(assembler.take_ready(), vec![block(0), block(1)]);
         assert_eq!(assembler.next_needed(), 1);
@@ -337,16 +378,16 @@ mod tests {
     fn refuses_a_duplicate_block() {
         let mut assembler = assembler(2, 8);
 
-        assert!(assembler.insert(0, 0, block(0)));
-        assert!(!assembler.insert(0, 0, block(9)));
+        assert!(assembler.insert(0, 0, 0, block(0)));
+        assert!(!assembler.insert(0, 0, 0, block(9)));
     }
 
     #[test]
     fn keeps_the_block_it_stored_first() {
         let mut assembler = assembler(1, 8);
 
-        assembler.insert(0, 0, block(1));
-        assembler.insert(0, 0, block(2));
+        assembler.insert(0, 0, 0, block(1));
+        assembler.insert(0, 0, 0, block(2));
 
         assert_eq!(assembler.take_ready(), vec![block(1)]);
     }
@@ -357,22 +398,22 @@ mod tests {
         fill(&mut assembler, 0, 1);
         assembler.take_ready();
 
-        assert!(!assembler.insert(0, 0, block(0)));
+        assert!(!assembler.insert(0, 0, 0, block(0)));
     }
 
     #[test]
     fn refuses_blocks_too_far_ahead_to_buffer() {
         let mut assembler = assembler(2, 4);
 
-        assert!(assembler.insert(3, 0, block(0)));
-        assert!(!assembler.insert(4, 0, block(0)));
+        assert!(assembler.insert(3, 0, 0, block(0)));
+        assert!(!assembler.insert(4, 0, 0, block(0)));
     }
 
     #[test]
     fn refuses_a_block_outside_its_slice() {
         let mut assembler = assembler(2, 8);
 
-        assert!(!assembler.insert(0, 2, block(0)));
+        assert!(!assembler.insert(0, 2, 0, block(0)));
     }
 
     #[test]
@@ -414,7 +455,7 @@ mod tests {
     #[test]
     fn reports_the_blocks_a_partial_slice_is_missing() {
         let mut assembler = assembler(4, 8);
-        assembler.insert(0, 1, block(1));
+        assembler.insert(0, 1, 0, block(1));
 
         assert_eq!(assembler.gaps(1), vec![(0, vec![0, 2, 3])]);
     }
@@ -456,7 +497,7 @@ mod tests {
         let mut assembler = assembler(4, 8);
         fill(&mut assembler, 0, 4);
         assembler.take_ready();
-        assembler.insert(1, 0, block(0));
+        assembler.insert(1, 0, 0, block(0));
         assembler.on_done(6);
 
         assert_eq!(assembler.gaps(1), vec![(1, vec![1])]);
@@ -469,9 +510,9 @@ mod tests {
 
         let mut assembler = fec_assembler(3, 2, 8);
         assembler.on_done(3);
-        assembler.insert(0, 0, Bytes::from(data[0].clone()));
-        assembler.insert(0, 2, Bytes::from(data[2].clone()));
-        assembler.insert(0, 3, Bytes::from(parity[0].clone()));
+        assembler.insert(0, 0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 2, 0, Bytes::from(data[2].clone()));
+        assembler.insert(0, 3, 2, Bytes::from(parity[0].clone()));
         let ready = assembler.take_ready();
 
         assert_eq!(
@@ -485,12 +526,57 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_shard_naming_a_different_parity_width() {
+        let data: Vec<Vec<u8>> = (0..3).map(shard).collect();
+        let parity = parity_for(3, 2, &data);
+
+        let mut assembler = fec_assembler(3, 2, 8);
+        assembler.on_done(3);
+
+        assert!(assembler.insert(0, 0, 2, Bytes::from(data[0].clone())));
+        assert!(!assembler.insert(0, 2, 1, Bytes::from(data[2].clone())));
+        assert!(assembler.insert(0, 2, 2, Bytes::from(data[2].clone())));
+        assert!(assembler.insert(0, 3, 2, Bytes::from(parity[0].clone())));
+
+        let expected: Vec<Bytes> = data.iter().map(|b| Bytes::from(b.clone())).collect();
+        assert_eq!(assembler.take_ready(), expected);
+    }
+
+    /// Recovery shards depend on how many of them a slice was encoded with,
+    /// so a slice sealed at one width has to be reconstructed against that
+    /// width and not against whatever the transfer allowed at its widest.
+    #[test]
+    fn reconstructs_slices_sealed_at_different_parity_widths() {
+        let data: Vec<Vec<u8>> = (0..3).map(shard).collect();
+        let wide = parity_for(3, 4, &data);
+        let narrow = parity_for(3, 1, &data);
+
+        let mut assembler = fec_assembler(3, 4, 8);
+        assembler.on_done(6);
+
+        for (slice_no, parity, width) in [(0, &wide, 4u8), (1, &narrow, 1u8)] {
+            assembler.insert(slice_no, 0, width, Bytes::from(data[0].clone()));
+            assembler.insert(slice_no, 2, width, Bytes::from(data[2].clone()));
+            assembler.insert(slice_no, 3, width, Bytes::from(parity[0].clone()));
+        }
+
+        let ready = assembler.take_ready();
+        let expected: Vec<Bytes> = data
+            .iter()
+            .chain(data.iter())
+            .map(|block| Bytes::from(block.clone()))
+            .collect();
+
+        assert_eq!(ready, expected);
+    }
+
+    #[test]
     fn a_slice_missing_more_than_the_parity_budget_is_not_recoverable() {
         let data: Vec<Vec<u8>> = (0..3).map(shard).collect();
 
         let mut assembler = fec_assembler(3, 2, 8);
-        assembler.insert(0, 0, Bytes::from(data[0].clone()));
-        assembler.insert(0, 1, Bytes::from(data[1].clone()));
+        assembler.insert(0, 0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 1, 0, Bytes::from(data[1].clone()));
 
         assert!(assembler.take_ready().is_empty());
     }
@@ -498,8 +584,8 @@ mod tests {
     #[test]
     fn asks_only_for_the_shortfall_to_reach_recovery() {
         let mut assembler = fec_assembler(3, 2, 8);
-        assembler.insert(0, 0, block(0));
-        assembler.insert(0, 1, block(1));
+        assembler.insert(0, 0, 0, block(0));
+        assembler.insert(0, 1, 0, block(1));
 
         assert_eq!(assembler.gaps(1), vec![(0, vec![2])]);
     }
@@ -518,13 +604,13 @@ mod tests {
 
         let mut assembler = fec_assembler(4, 2, 8);
         for slot in 0..4 {
-            assembler.insert(0, slot, Bytes::from(shard(slot as u8)));
+            assembler.insert(0, slot, 0, Bytes::from(shard(slot as u8)));
         }
         assert_eq!(assembler.take_ready().len(), 4);
 
         assembler.on_done(6);
-        assembler.insert(1, 0, Bytes::from(block4.clone()));
-        assembler.insert(1, 4, Bytes::from(parity[0].clone()));
+        assembler.insert(1, 0, 0, Bytes::from(block4.clone()));
+        assembler.insert(1, 4, 2, Bytes::from(parity[0].clone()));
 
         let ready = assembler.take_ready();
 
@@ -538,10 +624,10 @@ mod tests {
     fn zero_parity_still_needs_every_data_block() {
         let mut assembler = fec_assembler(2, 0, 8);
 
-        assembler.insert(0, 1, block(1));
+        assembler.insert(0, 1, 0, block(1));
         assert!(assembler.take_ready().is_empty());
 
-        assembler.insert(0, 0, block(0));
+        assembler.insert(0, 0, 0, block(0));
         assert_eq!(assembler.take_ready(), vec![block(0), block(1)]);
     }
 
@@ -551,9 +637,9 @@ mod tests {
         let parity = parity_for(3, 2, &data);
         let mut assembler = fec_assembler(3, 2, 8);
 
-        assembler.insert(0, 0, Bytes::from(data[0].clone()));
-        assembler.insert(0, 2, Bytes::from(data[2].clone()));
-        assembler.insert(0, 3, Bytes::from(parity[0].clone()));
+        assembler.insert(0, 0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 2, 0, Bytes::from(data[2].clone()));
+        assembler.insert(0, 3, 2, Bytes::from(parity[0].clone()));
 
         assert!(assembler.take_ready().is_empty());
 
@@ -566,9 +652,9 @@ mod tests {
     fn a_slice_with_a_successor_is_written_without_waiting_for_done() {
         let mut assembler = fec_assembler(4, 2, 8);
         for slot in 0..4 {
-            assembler.insert(0, slot, block(slot as u8));
+            assembler.insert(0, slot, 0, block(slot as u8));
         }
-        assembler.insert(1, 0, block(9));
+        assembler.insert(1, 0, 0, block(9));
 
         assert_eq!(assembler.take_ready().len(), 4);
     }
@@ -579,9 +665,9 @@ mod tests {
         let parity = parity_for(3, 2, &data);
         let mut assembler = fec_assembler(3, 2, 8);
 
-        assembler.insert(0, 0, Bytes::from(data[0].clone()));
-        assembler.insert(0, 1, Bytes::from(data[1].clone()));
-        assembler.insert(0, 3, Bytes::from(parity[0].clone()));
+        assembler.insert(0, 0, 0, Bytes::from(data[0].clone()));
+        assembler.insert(0, 1, 0, Bytes::from(data[1].clone()));
+        assembler.insert(0, 3, 2, Bytes::from(parity[0].clone()));
         assert!(assembler.take_ready().is_empty());
 
         assembler.on_done(2);

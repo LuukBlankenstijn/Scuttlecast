@@ -115,7 +115,7 @@ impl Receiver {
                 receiver_id, "joined session"
             );
 
-            Session::new(socket, sender, receiver_id, &hello)
+            Session::new(socket, sender, receiver_id, &hello)?
                 .run(blocks_tx)
                 .await
         });

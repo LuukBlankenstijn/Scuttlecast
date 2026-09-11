@@ -29,4 +29,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 bytes = "1.12.1"
 libc = "0.2"
-reed-solomon-erasure = "6.0.0"
+reed-solomon-simd = "3.1"

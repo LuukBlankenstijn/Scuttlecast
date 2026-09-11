@@ -17,7 +17,7 @@ fn slicer(blocks_per_slice: u16) -> Slicer {
     fec_slicer(blocks_per_slice, 0)
 }
 
-fn fec_slicer(blocks_per_slice: u16, parity_per_slice: u16) -> Slicer {
+fn fec_slicer(blocks_per_slice: u16, parity_per_slice: u8) -> Slicer {
     Slicer::new(
         NonZeroU32::new(crate::DEFAULT_BLOCK_SIZE).expect("block size"),
         NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
@@ -55,7 +55,7 @@ async fn run(input: &[u8], blocks_per_slice: u16) -> Vec<Outbound> {
     drive(slicer(blocks_per_slice), input).await
 }
 
-async fn fec_run(input: &[u8], blocks_per_slice: u16, parity_per_slice: u16) -> Vec<Outbound> {
+async fn fec_run(input: &[u8], blocks_per_slice: u16, parity_per_slice: u8) -> Vec<Outbound> {
     drive(fec_slicer(blocks_per_slice, parity_per_slice), input).await
 }
 
@@ -64,7 +64,7 @@ async fn fec_run(input: &[u8], blocks_per_slice: u16, parity_per_slice: u16) -> 
 async fn resent_shards(
     input: &[u8],
     blocks_per_slice: u16,
-    parity_per_slice: u16,
+    parity_per_slice: u8,
     mut requests: Vec<Feedback>,
 ) -> Vec<Resent> {
     let (outbound, mut collected) = mpsc::channel(256);

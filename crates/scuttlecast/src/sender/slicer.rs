@@ -29,9 +29,9 @@ impl Slicer {
     pub fn new(
         block_size: NonZeroU32,
         blocks_per_slice: NonZeroU16,
-        parity_per_slice: u16,
+        parity_per_slice: u8,
         max_live_slices: NonZeroUsize,
-    ) -> Result<Self, reed_solomon_erasure::Error> {
+    ) -> Result<Self, reed_solomon_simd::Error> {
         let block_size = block_size.get() as usize;
 
         Ok(Self {
@@ -76,7 +76,7 @@ impl Slicer {
 
                 message = feedback.recv() => match message {
                     Some(Feedback::Needed(first_needed)) => self.window.retain_from(first_needed),
-                    Some(Feedback::Cover(parity)) => self.window.cover(parity)?,
+                    Some(Feedback::Cover(parity)) => self.window.cover(parity),
                     Some(Feedback::Resend { slice_no, blocks }) => {
                         self.resend(slice_no, &blocks, &outbound).await?
                     }
@@ -95,6 +95,7 @@ impl Slicer {
         self.total_bytes += block.len() as u64;
         self.total_blocks += 1;
         let payload = self.padded(block);
+        let slice_parity = self.window.current_parity();
         let pushed = self.window.push(payload.clone());
 
         channel::send(
@@ -102,6 +103,7 @@ impl Slicer {
             Outbound::Shard {
                 slice_no: pushed.slice_no,
                 slot: pushed.block_in_slice,
+                slice_parity,
                 emit_floor: self.emit_floor,
                 payload,
             },
@@ -132,12 +134,14 @@ impl Slicer {
         outbound: &mpsc::Sender<Outbound>,
     ) -> Result<(), ProtoError> {
         let slice_no = sealed.slice_no;
+        let slice_parity = sealed.parity.len() as u8;
         for (parity_index, payload) in sealed.parity.into_iter().enumerate() {
             channel::send(
                 outbound,
                 Outbound::Shard {
                     slice_no,
                     slot: self.blocks_per_slice + parity_index as u16,
+                    slice_parity,
                     emit_floor: self.emit_floor,
                     payload,
                 },
@@ -154,6 +158,10 @@ impl Slicer {
         slots: &[u16],
         outbound: &mpsc::Sender<Outbound>,
     ) -> Result<(), ProtoError> {
+        let Some(slice_parity) = self.window.slice_parity(slice_no) else {
+            return Ok(());
+        };
+
         for &slot in slots {
             let Some(payload) = self.window.shard(slice_no, slot) else {
                 continue;
@@ -163,6 +171,7 @@ impl Slicer {
                 Outbound::Shard {
                     slice_no,
                     slot,
+                    slice_parity,
                     emit_floor: self.emit_floor,
                     payload: payload.clone(),
                 },

@@ -15,7 +15,7 @@ pub struct Hello {
     pub transfer_id: u64,
     pub block_size: NonZeroU32,
     pub blocks_per_slice: NonZeroU16,
-    pub parity_per_slice: u16,
+    pub parity_per_slice: u8,
     pub max_live_slices: NonZeroU16,
 }
 
