@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use scuttlecast::proto::Message;
+use scuttlecast::proto::{Frame, HEADER_SIZE, Message};
 use scuttlecast::receiver::Receiver;
 use scuttlecast::sender::Sender;
 use tempfile::TempDir;
@@ -138,6 +138,13 @@ impl Rogue {
 
     pub async fn send(&self, message: Message) {
         self.send_bytes(&message.encode().expect("encode")).await;
+    }
+
+    pub async fn send_frame(&self, frame: &Frame) {
+        let mut datagram = vec![0u8; HEADER_SIZE + frame.payload.len()];
+        datagram[..HEADER_SIZE].copy_from_slice(&frame.header());
+        datagram[HEADER_SIZE..].copy_from_slice(&frame.payload);
+        self.send_bytes(&datagram).await;
     }
 
     pub async fn send_bytes(&self, bytes: &[u8]) {

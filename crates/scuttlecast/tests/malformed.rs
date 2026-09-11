@@ -1,11 +1,11 @@
 mod common;
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
 
 use bytes::Bytes;
 use scuttlecast::error::ProtoError;
-use scuttlecast::proto::{Data, Hello, Message};
+use scuttlecast::proto::{Frame, Hello, Message};
 
 fn blocks_per_slice(blocks: u16) -> NonZeroU16 {
     NonZeroU16::new(blocks).expect("nonzero blocks per slice")
@@ -14,6 +14,7 @@ fn blocks_per_slice(blocks: u16) -> NonZeroU16 {
 fn hello(transfer_id: u64, blocks: u16) -> Hello {
     Hello {
         transfer_id,
+        block_size: NonZeroU32::new(scuttlecast::DEFAULT_BLOCK_SIZE).expect("block size"),
         blocks_per_slice: blocks_per_slice(blocks),
         parity_per_slice: 0,
         max_live_slices: blocks_per_slice(8),
@@ -40,19 +41,19 @@ async fn receive_one_transfer(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rejects_block_index_outside_its_slice() {
+async fn rejects_a_slot_outside_its_slice() {
     let (rogue, receiving, _output) = receive_one_transfer(80, 19000).await;
 
     rogue.send(Message::Hello(hello(1, 32))).await;
     rogue
-        .send(Message::Data(Data {
+        .send_frame(&Frame {
+            slot: 32,
             transfer_id: 1,
             seq: 0,
             slice_no: 0,
-            block_in_slice: 32,
             emit_floor: 0,
-            payload: Bytes::from(vec![1; 10]).into(),
-        }))
+            payload: Bytes::from(vec![1; 10]),
+        })
         .await;
 
     let result = tokio::time::timeout(Duration::from_secs(5), receiving)
@@ -63,10 +64,10 @@ async fn rejects_block_index_outside_its_slice() {
     assert!(
         matches!(
             result,
-            Err(ProtoError::Protocol(scuttlecast::proto::Error::BlockOutsideSlice {
-                block_in_slice: 32,
-                blocks_per_slice
-            })) if blocks_per_slice.get() == 32
+            Err(ProtoError::Protocol(scuttlecast::proto::Error::SlotOutsideSlice {
+                slot: 32,
+                slots
+            })) if slots == 32
         ),
         "got {result:?}"
     );

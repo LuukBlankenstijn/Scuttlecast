@@ -34,15 +34,12 @@ pub struct Args {
     #[arg(short, long, default_value = "300", value_parser = parse_seconds)]
     wait: Duration,
 
-    /// Blocks per second the sender will not exceed, even with no loss
+    /// Mebibytes per second the sender will not exceed, even with no loss
     #[arg(long)]
     max_rate: Option<f64>,
-
-    /// Most parity shards a slice may carry. The sender sends fewer as
-    /// receivers report less loss, and none on a clean link.
-    #[arg(long)]
-    parity: Option<u16>,
 }
+
+const MIB: f64 = 1024.0 * 1024.0;
 
 fn parse_seconds(s: &str) -> Result<Duration, String> {
     s.parse::<u64>()
@@ -50,12 +47,15 @@ fn parse_seconds(s: &str) -> Result<Duration, String> {
         .map_err(|e| e.to_string())
 }
 
+fn blocks_per_second(mib_per_second: f64) -> f64 {
+    mib_per_second * MIB / scuttlecast::DEFAULT_BLOCK_SIZE as f64
+}
+
 pub async fn send(args: Args) -> Result<(), ProtoError> {
     let sender = scuttlecast::sender::Sender::builder()
         .socket(args.local_ip, args.group_ip, args.port)?
         .maybe_min_receivers(args.min_receivers)
-        .maybe_max_rate(args.max_rate)
-        .maybe_parity_per_slice(args.parity)
+        .maybe_max_rate(args.max_rate.map(blocks_per_second))
         .max_wait(args.wait)
         .build();
 
@@ -75,13 +75,18 @@ async fn report(mut progress: watch::Receiver<TransferState>) {
         let state = progress.borrow_and_update().clone();
 
         info!(
-            rate = format!("{:.1} MiB/s", state.bytes_per_second() / (1024.0 * 1024.0)),
-            blocks = state.blocks_sent,
-            slices = state.slices_emitted,
-            parity = state.parity_shards,
+            rate = format!("{:.1} MiB/s", state.bytes_per_second() / MIB),
+            sent = format!("{:.0} MiB", state.bytes_sent() as f64 / MIB),
             draining = state.draining,
             limited_by = %state.limiting,
             "sending"
+        );
+
+        debug!(
+            blocks = state.blocks_sent,
+            slices = state.slices_emitted,
+            parity = state.parity_shards,
+            "shards"
         );
 
         for receiver in &state.receivers {

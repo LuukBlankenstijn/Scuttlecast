@@ -3,9 +3,10 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
+use scuttlecast::SILENCE_TIMEOUT;
 use scuttlecast::error::ProtoError;
-use scuttlecast::proto::{Data, Done, Hello, Message};
-use scuttlecast::{BLOCK_SIZE, SILENCE_TIMEOUT};
+use scuttlecast::proto::{Done, Frame, HEADER_SIZE, Hello, Message};
+const BLOCK_SIZE: usize = scuttlecast::DEFAULT_BLOCK_SIZE as usize;
 use tokio::net::UdpSocket;
 
 async fn receive_stream(group_id: u8, port: u16) -> tokio::task::JoinHandle<Vec<u8>> {
@@ -84,20 +85,25 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
     let nonzero = |n: u16| std::num::NonZeroU16::new(n).expect("nonzero");
     send(Message::Hello(Hello {
         transfer_id,
+        block_size: std::num::NonZeroU32::new(scuttlecast::DEFAULT_BLOCK_SIZE).expect("block size"),
         blocks_per_slice: nonzero(32),
         parity_per_slice: 0,
         max_live_slices: nonzero(8),
     }))
     .await;
-    send(Message::Data(Data {
-        transfer_id,
+
+    let shard = Frame {
+        slot: 0,
+        transfer_id: transfer_id as u32,
         seq: 0,
         slice_no: 0,
-        block_in_slice: 0,
         emit_floor: 0,
-        payload: Bytes::from(vec![1; 100]).into(),
-    }))
-    .await;
+        payload: Bytes::from(vec![1; BLOCK_SIZE]),
+    };
+    let mut datagram = vec![0u8; HEADER_SIZE + BLOCK_SIZE];
+    datagram[..HEADER_SIZE].copy_from_slice(&shard.header());
+    datagram[HEADER_SIZE..].copy_from_slice(&shard.payload);
+    liar.send_to(&datagram, destination).await.expect("send");
     send(Message::Done(Done {
         transfer_id,
         total_bytes: 999_999,
@@ -113,7 +119,7 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
     match result {
         Err(ProtoError::ByteCountMismatch { expected, received }) => {
             assert_eq!(expected, 999_999);
-            assert_eq!(received, 100);
+            assert_eq!(received, BLOCK_SIZE as u64);
         }
         other => panic!("expected a byte count mismatch, got {other:?}"),
     }

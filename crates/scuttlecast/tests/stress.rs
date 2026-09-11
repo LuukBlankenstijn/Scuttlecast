@@ -1,6 +1,6 @@
 mod common;
 
-use scuttlecast::BLOCK_SIZE;
+const BLOCK_SIZE: usize = scuttlecast::DEFAULT_BLOCK_SIZE as usize;
 
 const MULTI_MB: usize = 4 * 1024 * 1024;
 

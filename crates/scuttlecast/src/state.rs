@@ -162,6 +162,7 @@ pub struct ReceiverState {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TransferState {
     pub transfer_id: u64,
+    pub block_size: u32,
     pub blocks_per_second: f64,
     pub blocks_sent: u64,
     pub slices_emitted: u32,
@@ -175,7 +176,11 @@ pub struct TransferState {
 
 impl TransferState {
     pub fn bytes_per_second(&self) -> f64 {
-        self.blocks_per_second * crate::BLOCK_SIZE as f64
+        self.blocks_per_second * self.block_size as f64
+    }
+
+    pub fn bytes_sent(&self) -> u64 {
+        self.blocks_sent * self.block_size as u64
     }
 
     /// The receiver holding the group back, which is the one worth looking at

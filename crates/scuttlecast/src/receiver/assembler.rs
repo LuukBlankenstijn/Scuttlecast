@@ -4,8 +4,6 @@ use std::num::NonZeroU16;
 use bytes::Bytes;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
-use crate::BLOCK_SIZE;
-
 const MAX_SHARDS_PER_SLICE: usize = 255;
 
 struct Slice {
@@ -56,6 +54,7 @@ impl Slice {
 }
 
 pub(super) struct Assembler {
+    block_size: usize,
     blocks_per_slice: u16,
     parity_per_slice: u16,
     max_live_slices: u32,
@@ -67,6 +66,7 @@ pub(super) struct Assembler {
 
 impl Assembler {
     pub(super) fn new(
+        block_size: usize,
         blocks_per_slice: NonZeroU16,
         parity_per_slice: u16,
         max_live_slices: NonZeroU16,
@@ -76,6 +76,7 @@ impl Assembler {
         let parity_per_slice = if codec.is_some() { parity_per_slice } else { 0 };
 
         Self {
+            block_size,
             blocks_per_slice,
             parity_per_slice,
             max_live_slices: max_live_slices.get() as u32,
@@ -84,6 +85,10 @@ impl Assembler {
             next_needed: 0,
             total_blocks: None,
         }
+    }
+
+    pub(super) fn total_slots(&self) -> u16 {
+        self.blocks_per_slice + self.parity_per_slice
     }
 
     pub(super) fn next_needed(&self) -> u32 {
@@ -112,7 +117,7 @@ impl Assembler {
             return false;
         }
 
-        let total_slots = self.blocks_per_slice + self.parity_per_slice;
+        let total_slots = self.total_slots();
         self.slices
             .entry(slice_no)
             .or_insert_with(|| Slice::empty(total_slots))
@@ -196,8 +201,10 @@ impl Assembler {
             .iter()
             .enumerate()
             .map(|(slot, held)| match held {
-                Some(payload) => Some(to_block(payload)),
-                None if (target..blocks_per_slice).contains(&slot) => Some(vec![0u8; BLOCK_SIZE]),
+                Some(payload) => Some(payload.to_vec()),
+                None if (target..blocks_per_slice).contains(&slot) => {
+                    Some(vec![0u8; self.block_size])
+                }
                 None => None,
             })
             .collect();
@@ -242,20 +249,10 @@ fn fec_codec(blocks_per_slice: u16, parity_per_slice: u16) -> Option<ReedSolomon
     ReedSolomon::new(blocks_per_slice as usize, parity_per_slice as usize).ok()
 }
 
-fn to_block(payload: &Bytes) -> Vec<u8> {
-    if payload.len() == BLOCK_SIZE {
-        return payload.to_vec();
-    }
-
-    let mut shard = vec![0u8; BLOCK_SIZE];
-    shard[..payload.len()].copy_from_slice(payload);
-    shard
-}
-
 #[cfg(test)]
 mod tests {
     use super::Assembler;
-    use crate::BLOCK_SIZE;
+    const BLOCK_SIZE: usize = crate::DEFAULT_BLOCK_SIZE as usize;
     use bytes::Bytes;
     use reed_solomon_erasure::galois_8::ReedSolomon;
     use std::num::NonZeroU16;
@@ -270,6 +267,7 @@ mod tests {
         max_live_slices: u16,
     ) -> Assembler {
         Assembler::new(
+            BLOCK_SIZE,
             NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
             parity_per_slice,
             NonZeroU16::new(max_live_slices).expect("max live slices"),

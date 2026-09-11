@@ -1,11 +1,10 @@
 use std::{
     collections::VecDeque,
     net::SocketAddr,
-    num::NonZeroU16,
     time::{Duration, Instant},
 };
 
-use crate::proto::{Data, Done, Hello, Message, Nak, Parity, Stats};
+use crate::proto::{Done, Error as ProtocolError, Frame, Hello, Message, Nak, Stats};
 use bytes::Bytes;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::debug;
@@ -14,7 +13,7 @@ use crate::{
     RENAK_INTERVAL, SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     receiver::{TransferSummary, assembler::Assembler, naks::Naks},
-    transport::MessageSocket,
+    transport::{Incoming, MessageSocket},
 };
 
 pub(super) async fn join_session(
@@ -26,7 +25,7 @@ pub(super) async fn join_session(
 
     let (hello, sender) = loop {
         tokio::select! {
-            r = socket.recv_from() => {
+            r = socket.recv_control(None) => {
                 if let (Message::Hello(hello), sender) = r? {
                     break (hello, sender);
                 }
@@ -41,7 +40,7 @@ pub(super) async fn join_session(
     };
 
     socket
-        .send_to(
+        .send_control(
             Message::Join {
                 transfer_id: hello.transfer_id,
                 receiver_id,
@@ -58,13 +57,13 @@ pub(super) struct Session {
     sender: SocketAddr,
     transfer_id: u64,
     receiver_id: u64,
-    blocks_per_slice: NonZeroU16,
+    block_size: usize,
     assembler: Assembler,
     naks: Naks,
     pending: VecDeque<Bytes>,
     emit_floor: u32,
     received: u64,
-    highest_seq: Option<u64>,
+    highest_seq: Option<u32>,
     duplicates: u64,
     late: u64,
     total_bytes: Option<u64>,
@@ -82,13 +81,16 @@ impl Session {
         receiver_id: u64,
         hello: &Hello,
     ) -> Self {
+        let block_size = hello.block_size.get() as usize;
+
         Self {
             socket,
             sender,
             transfer_id: hello.transfer_id,
             receiver_id,
-            blocks_per_slice: hello.blocks_per_slice,
+            block_size,
             assembler: Assembler::new(
+                block_size,
                 hello.blocks_per_slice,
                 hello.parity_per_slice,
                 hello.max_live_slices,
@@ -115,15 +117,16 @@ impl Session {
     ) -> Result<TransferSummary, ProtoError> {
         let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
         let mut renak_tick = tokio::time::interval(RENAK_INTERVAL);
+        let transfer_id = self.transfer_id;
+        let mut arrivals = Vec::new();
 
         while !self.assembler.is_finished() || !self.pending.is_empty() {
             let silence = SILENCE_TIMEOUT.saturating_sub(self.last_packet.elapsed());
 
             tokio::select! {
-                r = self.socket.recv_in_transfer(self.transfer_id) => {
-                    let (message, _) = r?;
+                r = self.socket.recv_batch(transfer_id, &mut arrivals) => {
+                    r?;
                     self.last_packet = Instant::now();
-                    self.on_message(message).await?;
                 }
 
                 _ = sink.reserve(), if !self.pending.is_empty() => {}
@@ -137,6 +140,9 @@ impl Session {
                 }
             }
 
+            for arrival in arrivals.drain(..) {
+                self.on_arrival(arrival).await?;
+            }
             self.hand_over(&sink)?;
         }
 
@@ -144,7 +150,7 @@ impl Session {
 
         self.send_stats().await?;
         self.socket
-            .send_to(
+            .send_control(
                 Message::Leave {
                     transfer_id: self.transfer_id,
                     receiver_id: self.receiver_id,
@@ -156,45 +162,42 @@ impl Session {
         Ok(self.summary())
     }
 
-    async fn on_message(&mut self, message: Message) -> Result<(), ProtoError> {
-        match message {
-            Message::Data(data) => self.on_data(data).await?,
-            Message::Parity(parity) => self.on_parity(parity).await?,
-            Message::Done(done) => self.on_done(done).await?,
-            Message::Hello(_) if self.received == 0 => {
+    async fn on_arrival(&mut self, arrival: Incoming) -> Result<(), ProtoError> {
+        match arrival {
+            Incoming::Shard(frame) => self.on_shard(frame).await,
+            Incoming::Control(Message::Done(done)) => self.on_done(done).await,
+            Incoming::Control(Message::Hello(_)) if self.received == 0 => {
                 self.socket
-                    .send_to(
+                    .send_control(
                         Message::Join {
                             transfer_id: self.transfer_id,
                             receiver_id: self.receiver_id,
                         },
                         self.sender,
                     )
-                    .await?
+                    .await
             }
-            Message::Evicted(evicted) if evicted.target == self.receiver_id => {
-                return Err(ProtoError::Evicted(evicted.reason));
+            Incoming::Control(Message::Evicted(evicted)) if evicted.target == self.receiver_id => {
+                Err(ProtoError::Evicted(evicted.reason))
             }
-            _ => {}
+            Incoming::Control(_) => Ok(()),
         }
-
-        Ok(())
     }
 
-    async fn on_data(&mut self, data: Data) -> Result<(), ProtoError> {
-        data.block_no(self.blocks_per_slice)?;
+    async fn on_shard(&mut self, frame: Frame) -> Result<(), ProtoError> {
+        self.check_shard(&frame)?;
 
         self.received += 1;
-        self.highest_seq = Some(self.highest_seq.unwrap_or(0).max(data.seq));
+        self.highest_seq = Some(self.highest_seq.unwrap_or(0).max(frame.seq));
 
-        let floor_advanced = data.emit_floor > self.emit_floor;
-        self.emit_floor = self.emit_floor.max(data.emit_floor);
+        let floor_advanced = frame.emit_floor > self.emit_floor;
+        self.emit_floor = self.emit_floor.max(frame.emit_floor);
 
         if !self
             .assembler
-            .insert(data.slice_no, data.block_in_slice, data.payload.into())
+            .insert(frame.slice_no, frame.slot, frame.payload)
         {
-            self.refused(data.slice_no);
+            self.refused(frame.slice_no);
         }
 
         if floor_advanced {
@@ -203,24 +206,21 @@ impl Session {
         Ok(())
     }
 
-    async fn on_parity(&mut self, parity: Parity) -> Result<(), ProtoError> {
-        self.received += 1;
-        self.highest_seq = Some(self.highest_seq.unwrap_or(0).max(parity.seq));
-
-        let floor_advanced = parity.emit_floor > self.emit_floor;
-        self.emit_floor = self.emit_floor.max(parity.emit_floor);
-
-        let slot = self.blocks_per_slice.get() + parity.parity_index;
-        if !self
-            .assembler
-            .insert(parity.slice_no, slot, parity.payload.into())
-        {
-            self.refused(parity.slice_no);
+    fn check_shard(&self, frame: &Frame) -> Result<(), ProtocolError> {
+        let slots = self.assembler.total_slots();
+        if frame.slot >= slots {
+            return Err(ProtocolError::SlotOutsideSlice {
+                slot: frame.slot,
+                slots,
+            });
+        }
+        if frame.payload.len() != self.block_size {
+            return Err(ProtocolError::PayloadSize {
+                got: frame.payload.len(),
+                expected: self.block_size,
+            });
         }
 
-        if floor_advanced {
-            self.request_gaps().await?;
-        }
         Ok(())
     }
 
@@ -294,14 +294,14 @@ impl Session {
             transfer_id: self.transfer_id,
             receiver_id: self.receiver_id,
             total_received: self.received,
-            total_expected: self.highest_seq.map_or(0, |seq| seq + 1),
+            total_expected: self.highest_seq.map_or(0, |seq| seq as u64 + 1),
             next_needed_slice: self.assembler.next_needed(),
             sink_stall_ms: std::mem::take(&mut self.sink_stall)
                 .as_millis()
                 .min(u32::MAX as u128) as u32,
         });
 
-        self.socket.send_to(message, self.sender).await
+        self.socket.send_control(message, self.sender).await
     }
 
     async fn request_gaps(&mut self) -> Result<(), ProtoError> {
@@ -315,7 +315,7 @@ impl Session {
                 slice_no,
                 missing,
             });
-            self.socket.send_to(message, self.sender).await?;
+            self.socket.send_control(message, self.sender).await?;
         }
 
         Ok(())
@@ -347,7 +347,7 @@ impl Session {
             total_bytes: self.written_bytes,
             total_blocks: self.blocks_written,
             received: self.received,
-            expected: self.highest_seq.map_or(0, |seq| seq + 1),
+            expected: self.highest_seq.map_or(0, |seq| seq as u64 + 1),
             duplicates: self.duplicates,
             late: self.late,
             naks_sent: self.naks.total(),

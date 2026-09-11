@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use scuttlecast::BLOCK_SIZE;
+const BLOCK_SIZE: usize = scuttlecast::DEFAULT_BLOCK_SIZE as usize;
 use tokio::task::JoinHandle;
 
 fn spawn_receiver(group_id: u8, port: u16, path: std::path::PathBuf) -> JoinHandle<()> {

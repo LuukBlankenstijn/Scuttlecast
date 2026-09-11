@@ -7,9 +7,9 @@ pub mod sender;
 pub mod state;
 mod transport;
 
-pub use transport::Losing;
+pub use transport::{Incoming, Losing};
 
-pub const BLOCK_SIZE: usize = 1400;
+pub const DEFAULT_BLOCK_SIZE: u32 = 1452;
 
 /// How often a receiver reports, which is also what frees the sender's window
 pub(crate) const STATS_INTERVAL: Duration = Duration::from_millis(100);

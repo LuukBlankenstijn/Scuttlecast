@@ -27,6 +27,7 @@ thiserror.workspace = true
 bon.workspace = true
 tracing.workspace = true
 bytes.workspace = true
+libc.workspace = true
 reed-solomon-erasure.workspace = true
 tokio = { workspace = true, features = [
     "rt-multi-thread",

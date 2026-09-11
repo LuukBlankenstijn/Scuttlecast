@@ -4,18 +4,12 @@ use tokio::sync::mpsc;
 use crate::error::ProtoError;
 
 pub enum Outbound {
-    Block {
+    Shard {
         slice_no: u32,
-        block_in_slice: u16,
+        slot: u16,
         /// Slices whose every block has been queued at least once. Stamped on
         /// every message rather than announced once, so a receiver that missed
         /// earlier traffic still learns it.
-        emit_floor: u32,
-        payload: Bytes,
-    },
-    Parity {
-        slice_no: u32,
-        parity_index: u16,
         emit_floor: u32,
         payload: Bytes,
     },

@@ -1,11 +1,11 @@
 use std::{
     net::Ipv4Addr,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     path::PathBuf,
     time::Duration,
 };
 
-use crate::proto::{Data, Done, Evicted, Hello, Message, Parity};
+use crate::proto::{Done, Evicted, Frame, FrameBatch, Hello, Message};
 use bon::Builder;
 use tokio::{
     io::AsyncRead,
@@ -18,7 +18,7 @@ use crate::{
     SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
     sender::group::Group,
-    sender::pacer::{Pacer, REPAIR_THRESHOLD, RateController, TICK_INTERVAL},
+    sender::pacer::{Batching, Pacer, REPAIR_THRESHOLD, RateController, TICK_INTERVAL},
     sender::slicer::Slicer,
     sender::slicer::channel::{Feedback, Outbound},
     state::{Bottleneck, TransferState},
@@ -30,7 +30,8 @@ mod pacer;
 mod slicer;
 
 const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero");
-const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(512).expect("nonzero");
+const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(2048).expect("nonzero");
+const DEFAULT_BLOCK_SIZE: NonZeroU32 = NonZeroU32::new(crate::DEFAULT_BLOCK_SIZE).expect("nonzero");
 
 /// Loss arrives in bursts, so parity covers this multiple of the average
 const PARITY_HEADROOM: f64 = 2.0;
@@ -42,8 +43,9 @@ const SOURCE_WAIT_FLOOR: Duration = Duration::from_millis(TICK_INTERVAL.as_milli
 const SINK_STALL_FLOOR: u32 = STATS_INTERVAL.as_millis() as u32 / 4;
 const DEFAULT_PARITY_PER_SLICE: u16 = 8;
 
-/// Blocks taken from the slicer per pass through the send loop
-const SEND_BATCH: usize = 256;
+const OUTBOUND_CAPACITY: usize = 4096;
+
+const UNCAPPED_BATCH_SEGMENTS: usize = usize::MAX;
 
 #[derive(Builder)]
 pub struct Sender {
@@ -62,6 +64,10 @@ pub struct Sender {
     max_live_slices: NonZeroU16,
     #[builder(default = DEFAULT_PARITY_PER_SLICE)]
     parity_per_slice: u16,
+    #[builder(default = DEFAULT_BLOCK_SIZE)]
+    block_size: NonZeroU32,
+    #[builder(default = UNCAPPED_BATCH_SEGMENTS)]
+    max_batch_segments: usize,
     /// Blocks per second the sender will not exceed even when nothing is lost
     max_rate: Option<f64>,
     #[builder(default = watch::channel(TransferState::default()).0)]
@@ -103,18 +109,24 @@ impl Sender {
         debug!("starting send with {participants_at_start} participants");
         group.mark_all_seen(std::time::Instant::now());
 
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Outbound>(64);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Outbound>(OUTBOUND_CAPACITY);
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel::<Feedback>();
         let max_live_slices =
             NonZeroUsize::new(self.max_live_slices.get() as usize).expect("nonzero");
         let slicer = Slicer::new(
+            self.block_size,
             self.blocks_per_slice,
             self.parity_per_slice,
             max_live_slices,
         )?;
         let slicer_task = tokio::spawn(slicer.run(reader, outbound_tx, feedback_rx));
 
-        let mut seq: u64 = 0;
+        let mut batching = Batching::default();
+        let mut batch = FrameBatch::new(self.block_size.get() as usize, self.max_batch_segments);
+        batch.narrow_to(batching.segments(self.max_batch_segments));
+        let drain_limit = batch.capacity();
+
+        let mut seq: u32 = 0;
         let mut total_bytes = 0u64;
         let mut total_blocks = 0u64;
         let mut draining = false;
@@ -127,7 +139,7 @@ impl Sender {
         let mut blocks_at_last_tick = 0u64;
         let mut slices_emitted = 0u32;
         let mut source_wait = Duration::ZERO;
-        let mut batch = Vec::with_capacity(SEND_BATCH);
+        let mut queued = Vec::with_capacity(drain_limit);
 
         let result = loop {
             if group.len() == 0 {
@@ -139,54 +151,49 @@ impl Sender {
 
             let rate = rate_controller.rate();
             pacer.refill(rate);
-            let budget = pacer.budget().min(SEND_BATCH);
+            let credit = pacer.budget();
+            let budget = credit.min(drain_limit);
             let until_credit = pacer.time_until_credit(rate);
             let drain_left =
                 drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
             let waited_since = Instant::now();
             tokio::select! {
-                taken = outbound_rx.recv_many(&mut batch, budget), if budget > 0 => {
+                taken = outbound_rx.recv_many(&mut queued, budget), if budget > 0 => {
                     if taken == 0 {
                         break Err(ProtoError::EgressClosed);
                     }
                     source_wait += waited_since.elapsed();
-                    if taken == budget && !outbound_rx.is_empty() {
+                    let pacer_was_binding = credit <= drain_limit;
+                    if pacer_was_binding && taken == credit && !outbound_rx.is_empty() {
                         pacer.waited();
                     }
 
-                    for outbound in batch.drain(..) {
+                    for outbound in queued.drain(..) {
                         match outbound {
-                            Outbound::Block { slice_no, block_in_slice, emit_floor, payload } => {
+                            Outbound::Shard { slice_no, slot, emit_floor, payload } => {
                                 pacer.consume();
-                                self.socket.send_to_group(Message::Data(Data {
-                                    transfer_id,
+                                batch.push(&Frame {
+                                    slot,
+                                    transfer_id: transfer_id as u32,
                                     seq,
                                     slice_no,
-                                    block_in_slice,
                                     emit_floor,
-                                    payload: payload.into(),
-                                })).await?;
-                                seq += 1;
-                                blocks_sent += 1;
+                                    payload,
+                                });
+                                seq = seq.wrapping_add(1);
+                                if slot < self.blocks_per_slice.get() {
+                                    blocks_sent += 1;
+                                }
                                 slices_emitted = slices_emitted.max(emit_floor);
                                 group.on_emitted(emit_floor);
-                            }
-                            Outbound::Parity { slice_no, parity_index, emit_floor, payload } => {
-                                pacer.consume();
-                                self.socket.send_to_group(Message::Parity(Parity {
-                                    transfer_id,
-                                    seq,
-                                    slice_no,
-                                    parity_index,
-                                    emit_floor,
-                                    payload: payload.into(),
-                                })).await?;
-                                seq += 1;
-                                slices_emitted = slices_emitted.max(emit_floor);
-                                group.on_emitted(emit_floor);
+
+                                if batch.is_full() {
+                                    self.socket.send_batch(&mut batch).await?;
+                                }
                             }
                             Outbound::Eof { total_bytes: bytes, total_blocks: blocks } => {
+                                self.socket.send_batch(&mut batch).await?;
                                 total_bytes = bytes;
                                 total_blocks = blocks;
                                 let total_slices =
@@ -202,6 +209,7 @@ impl Sender {
                             }
                         }
                     }
+                    self.socket.send_batch(&mut batch).await?;
                 },
 
                 _ = tokio::time::sleep(until_credit), if budget == 0 => {
@@ -248,6 +256,8 @@ impl Sender {
                         covering = wanted;
                         let _ = feedback_tx.send(Feedback::Cover(wanted));
                     }
+                    batching.observe(group.worst_loss());
+                    batch.narrow_to(batching.segments(self.max_batch_segments));
 
                     let limiting = self
                         .bottleneck(
@@ -260,8 +270,9 @@ impl Sender {
                         )
                         .attribute();
                     self.progress.send_replace(TransferState {
+                        block_size: self.block_size.get(),
                         transfer_id,
-                        blocks_per_second: rate_controller.rate(),
+                        blocks_per_second: sent_this_tick as f64 / TICK_INTERVAL.as_secs_f64(),
                         blocks_sent,
                         slices_emitted,
                         parity_shards: covering,
@@ -279,7 +290,7 @@ impl Sender {
                     });
                 }
 
-                m = self.socket.recv_in_transfer(transfer_id) => {
+                m = self.socket.recv_control(Some(transfer_id)) => {
                     let (message, _) = m?;
                     match message {
                         Message::Stats(stats) => {
@@ -345,6 +356,7 @@ impl Sender {
     fn hello(&self, transfer_id: u64) -> Message {
         Message::Hello(Hello {
             transfer_id,
+            block_size: self.block_size,
             blocks_per_slice: self.blocks_per_slice,
             parity_per_slice: self.parity_per_slice,
             max_live_slices: self.max_live_slices,
@@ -361,7 +373,7 @@ impl Sender {
             tokio::select! {
                 _ = hello_tick.tick() => self.socket.send_to_group(self.hello(transfer_id)).await?,
 
-                r = self.socket.recv_in_transfer(transfer_id) => {
+                r = self.socket.recv_control(Some(transfer_id)) => {
                     let (message, socket) = r?;
                     if let Message::Join { receiver_id, .. } = message && group.join(receiver_id, socket) {
                         tracing::debug!(socket=%socket, receiver_id, "receiver joined");
@@ -396,20 +408,21 @@ fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u16) 
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_BLOCKS_PER_SLICE, DEFAULT_MAX_LIVE_SLICES, STATS_INTERVAL, parity_for};
-    use crate::BLOCK_SIZE;
     use std::num::NonZeroU16;
 
+    const BLOCK_SIZE: usize = crate::DEFAULT_BLOCK_SIZE as usize;
+
     #[test]
-    fn the_default_window_and_report_interval_clear_a_gigabit_link() {
+    fn the_default_window_and_report_interval_clear_a_multi_gigabit_link() {
         let window = DEFAULT_MAX_LIVE_SLICES.get() as f64
             * DEFAULT_BLOCKS_PER_SLICE.get() as f64
             * BLOCK_SIZE as f64;
         let ceiling = window / STATS_INTERVAL.as_secs_f64();
 
         assert!(
-            ceiling > 2e8,
-            "the defaults cap throughput at {:.0} MiB/s",
-            ceiling / (1024.0 * 1024.0)
+            ceiling > 6.25e8,
+            "the defaults cap throughput at {:.2} Gbps",
+            ceiling * 8.0 / 1e9
         );
     }
 

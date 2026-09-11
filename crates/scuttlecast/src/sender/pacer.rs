@@ -78,6 +78,35 @@ fn burst_cap(rate: f64) -> f64 {
     (rate * BURST_QUANTUM.as_secs_f64()).clamp(MIN_BURST, MAX_BURST)
 }
 
+#[derive(Default)]
+pub struct Batching {
+    clean_windows: u32,
+    gave_up: bool,
+}
+
+impl Batching {
+    const CLEAN_WINDOWS_NEEDED: u32 = 3;
+
+    pub fn observe(&mut self, loss: Option<f64>) {
+        match loss {
+            Some(loss) if loss > REPAIR_THRESHOLD => {
+                self.gave_up = true;
+                self.clean_windows = 0;
+            }
+            Some(_) => self.clean_windows += 1,
+            None => {}
+        }
+    }
+
+    pub fn segments(&self, uncapped: usize) -> usize {
+        if self.gave_up || self.clean_windows < Self::CLEAN_WINDOWS_NEEDED {
+            return 1;
+        }
+
+        uncapped
+    }
+}
+
 struct ClientLoss {
     ewma: f64,
     last_report_at: Instant,
@@ -215,10 +244,46 @@ impl RateController {
 #[cfg(test)]
 mod tests {
     use super::{
-        BURST_QUANTUM, INITIAL_RATE, MAX_BURST, MIN_BURST, MIN_FACTOR, MIN_RATE, Pacer,
+        BURST_QUANTUM, Batching, INITIAL_RATE, MAX_BURST, MIN_BURST, MIN_FACTOR, MIN_RATE, Pacer,
         RATE_RECOVERY_FRACTION, RateController, SLOW_START_FACTOR,
     };
     use std::time::Duration;
+
+    const UNCAPPED: usize = 44;
+
+    fn batching_after(reports: &[Option<f64>]) -> usize {
+        let mut batching = Batching::default();
+        for report in reports {
+            batching.observe(*report);
+        }
+        batching.segments(UNCAPPED)
+    }
+
+    #[test]
+    fn a_transfer_sends_one_shard_per_call_until_the_link_proves_clean() {
+        assert_eq!(batching_after(&[]), 1);
+        assert_eq!(batching_after(&[None, None, None, None]), 1);
+        assert_eq!(batching_after(&[Some(0.0), Some(0.0)]), 1);
+    }
+
+    #[test]
+    fn a_link_measured_clean_for_long_enough_earns_batching() {
+        assert_eq!(batching_after(&[Some(0.0), Some(0.0), Some(0.0)]), UNCAPPED);
+    }
+
+    #[test]
+    fn one_clean_window_amongst_repairs_does_not_earn_batching() {
+        assert_eq!(batching_after(&[Some(0.3), Some(0.0), Some(0.3)]), 1);
+    }
+
+    #[test]
+    fn loss_gives_batching_up_for_the_rest_of_the_transfer() {
+        let clean = [Some(0.0); 6];
+        let mut reports = vec![Some(0.3)];
+        reports.extend_from_slice(&clean);
+
+        assert_eq!(batching_after(&reports), 1);
+    }
 
     fn ticks(controller: &mut RateController, count: usize) {
         for _ in 0..count {

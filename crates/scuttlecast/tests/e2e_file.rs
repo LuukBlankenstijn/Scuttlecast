@@ -1,6 +1,6 @@
 mod common;
 
-use scuttlecast::BLOCK_SIZE;
+const BLOCK_SIZE: usize = scuttlecast::DEFAULT_BLOCK_SIZE as usize;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfers_empty_file() {

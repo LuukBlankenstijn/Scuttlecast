@@ -1,13 +1,13 @@
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 
+use crate::error::ProtoError;
 use crate::sender::slicer::channel::{Feedback, Outbound};
 use crate::sender::slicer::window::{Sealed, Window};
-use crate::{BLOCK_SIZE, error::ProtoError};
 
 pub mod blocks;
 pub mod channel;
@@ -18,6 +18,7 @@ mod tests;
 
 pub struct Slicer {
     window: Window,
+    block_size: usize,
     blocks_per_slice: u16,
     emit_floor: u32,
     total_bytes: u64,
@@ -26,12 +27,21 @@ pub struct Slicer {
 
 impl Slicer {
     pub fn new(
+        block_size: NonZeroU32,
         blocks_per_slice: NonZeroU16,
         parity_per_slice: u16,
         max_live_slices: NonZeroUsize,
     ) -> Result<Self, reed_solomon_erasure::Error> {
+        let block_size = block_size.get() as usize;
+
         Ok(Self {
-            window: Window::new(blocks_per_slice, parity_per_slice, max_live_slices)?,
+            window: Window::new(
+                block_size,
+                blocks_per_slice,
+                parity_per_slice,
+                max_live_slices,
+            )?,
+            block_size,
             blocks_per_slice: blocks_per_slice.get(),
             emit_floor: 0,
             total_bytes: 0,
@@ -45,7 +55,7 @@ impl Slicer {
         outbound: mpsc::Sender<Outbound>,
         mut feedback: mpsc::UnboundedReceiver<Feedback>,
     ) -> Result<(), ProtoError> {
-        let mut input = Box::pin(blocks::split(reader, BLOCK_SIZE));
+        let mut input = Box::pin(blocks::split(reader, self.block_size));
         let mut drained = false;
 
         loop {
@@ -79,18 +89,19 @@ impl Slicer {
 
     async fn push(
         &mut self,
-        payload: Bytes,
+        block: Bytes,
         outbound: &mpsc::Sender<Outbound>,
     ) -> Result<(), ProtoError> {
-        self.total_bytes += payload.len() as u64;
+        self.total_bytes += block.len() as u64;
         self.total_blocks += 1;
+        let payload = self.padded(block);
         let pushed = self.window.push(payload.clone());
 
         channel::send(
             outbound,
-            Outbound::Block {
+            Outbound::Shard {
                 slice_no: pushed.slice_no,
-                block_in_slice: pushed.block_in_slice,
+                slot: pushed.block_in_slice,
                 emit_floor: self.emit_floor,
                 payload,
             },
@@ -101,6 +112,16 @@ impl Slicer {
             self.queue_parity(sealed, outbound).await?;
         }
         Ok(())
+    }
+
+    fn padded(&self, block: Bytes) -> Bytes {
+        if block.len() == self.block_size {
+            return block;
+        }
+
+        let mut full = BytesMut::zeroed(self.block_size);
+        full[..block.len()].copy_from_slice(&block);
+        full.freeze()
     }
 
     /// Queues every parity shard of a freshly sealed slice, then advances the
@@ -114,9 +135,9 @@ impl Slicer {
         for (parity_index, payload) in sealed.parity.into_iter().enumerate() {
             channel::send(
                 outbound,
-                Outbound::Parity {
+                Outbound::Shard {
                     slice_no,
-                    parity_index: parity_index as u16,
+                    slot: self.blocks_per_slice + parity_index as u16,
                     emit_floor: self.emit_floor,
                     payload,
                 },
@@ -137,23 +158,16 @@ impl Slicer {
             let Some(payload) = self.window.shard(slice_no, slot) else {
                 continue;
             };
-            let payload = payload.clone();
-            let message = if slot < self.blocks_per_slice {
-                Outbound::Block {
+            channel::send(
+                outbound,
+                Outbound::Shard {
                     slice_no,
-                    block_in_slice: slot,
+                    slot,
                     emit_floor: self.emit_floor,
-                    payload,
-                }
-            } else {
-                Outbound::Parity {
-                    slice_no,
-                    parity_index: slot - self.blocks_per_slice,
-                    emit_floor: self.emit_floor,
-                    payload,
-                }
-            };
-            channel::send(outbound, message).await?;
+                    payload: payload.clone(),
+                },
+            )
+            .await?;
         }
         Ok(())
     }

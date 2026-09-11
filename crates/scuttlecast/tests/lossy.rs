@@ -3,15 +3,15 @@ mod common;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use scuttlecast::BLOCK_SIZE;
-use scuttlecast::Losing;
 use scuttlecast::proto::Message;
+use scuttlecast::{Incoming, Losing};
 
+const BLOCK_SIZE: usize = scuttlecast::DEFAULT_BLOCK_SIZE as usize;
 const BLOCKS_PER_SLICE: u64 = 32;
 
 fn every_nth_block(step: u64, offset: u64) -> Losing {
-    Losing::every(move |message| match message {
-        Message::Data(data) => data.seq % step == offset,
+    Losing::every(move |incoming| match incoming {
+        Incoming::Shard(frame) => frame.seq as u64 % step == offset,
         _ => false,
     })
 }
@@ -22,10 +22,12 @@ fn every_nth_block(step: u64, offset: u64) -> Losing {
 fn slice_swallowed(slice_no: u32, times: usize) -> Losing {
     let swallowed: Mutex<HashMap<u16, usize>> = Mutex::new(HashMap::new());
 
-    Losing::every(move |message| match message {
-        Message::Data(data) if data.slice_no == slice_no => {
+    Losing::every(move |incoming| match incoming {
+        Incoming::Shard(frame)
+            if frame.slice_no == slice_no && u64::from(frame.slot) < BLOCKS_PER_SLICE =>
+        {
             let mut swallowed = swallowed.lock().expect("swallowed blocks");
-            let seen = swallowed.entry(data.block_in_slice).or_default();
+            let seen = swallowed.entry(frame.slot).or_default();
             *seen += 1;
             *seen <= times
         }
@@ -33,11 +35,11 @@ fn slice_swallowed(slice_no: u32, times: usize) -> Losing {
     })
 }
 
-fn first_few(count: usize, rule: impl Fn(&Message) -> bool + Send + Sync + 'static) -> Losing {
+fn first_few(count: usize, rule: impl Fn(&Incoming) -> bool + Send + Sync + 'static) -> Losing {
     let seen = Mutex::new(0usize);
 
-    Losing::every(move |message| {
-        if !rule(message) {
+    Losing::every(move |incoming| {
+        if !rule(incoming) {
             return false;
         }
         let mut seen = seen.lock().expect("seen count");
@@ -156,7 +158,9 @@ async fn finishes_when_the_first_announcements_of_the_end_are_lost() {
         53,
         16030,
         &sent,
-        vec![first_few(3, |message| matches!(message, Message::Done(_)))],
+        vec![first_few(3, |incoming| {
+            matches!(incoming, Incoming::Control(Message::Done(_)))
+        })],
     )
     .await;
 

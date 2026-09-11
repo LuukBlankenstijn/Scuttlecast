@@ -2,9 +2,9 @@ use bincode::config::standard;
 use bincode::{Decode, Encode};
 use derive_more::Display;
 
-use super::MAX_DATAGRAM_SIZE;
 use super::error::Error;
-use super::payload::{Data, Done, Evicted, Hello, Nak, Parity, Stats};
+use super::frame::CONTROL_TAG;
+use super::payload::{Done, Evicted, Hello, Nak, Stats};
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -22,8 +22,6 @@ pub enum Message {
         transfer_id: u64,
         receiver_id: u64,
     },
-    Data(Data),
-    Parity(Parity),
     Stats(Stats),
     Nak(Nak),
     Evicted(Evicted),
@@ -36,8 +34,6 @@ impl Message {
             Message::Hello(hello) => hello.transfer_id,
             Message::Join { transfer_id, .. } => *transfer_id,
             Message::Leave { transfer_id, .. } => *transfer_id,
-            Message::Data(data) => data.transfer_id,
-            Message::Parity(parity) => parity.transfer_id,
             Message::Stats(stats) => stats.transfer_id,
             Message::Nak(nak) => nak.transfer_id,
             Message::Evicted(evicted) => evicted.transfer_id,
@@ -46,18 +42,26 @@ impl Message {
     }
 
     pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        Ok(bincode::encode_into_slice(self, buf, standard())?)
+        buf[0] = CONTROL_TAG;
+        Ok(1 + bincode::encode_into_slice(self, &mut buf[1..], standard())?)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+        let mut buf = vec![0u8; super::MAX_CONTROL_SIZE];
         let len = self.encode_into(&mut buf)?;
         buf.truncate(len);
         Ok(buf)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (message, _) = bincode::decode_from_slice(bytes, standard())?;
+        let Some((&tag, body)) = bytes.split_first() else {
+            return Err(Error::FrameTooShort(0));
+        };
+        if tag != CONTROL_TAG {
+            return Err(Error::UnknownTag(tag));
+        }
+
+        let (message, _) = bincode::decode_from_slice(body, standard())?;
         Ok(message)
     }
 }
@@ -65,6 +69,8 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::Message;
+    use crate::proto::error::Error;
+    use crate::proto::frame::FRAME_TAG;
     use proptest::prelude::*;
 
     proptest! {
@@ -72,5 +78,17 @@ mod tests {
         fn roundtrip(message: Message) {
             prop_assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn refuses_to_read_a_shard_as_a_control_message() {
+        assert!(
+            matches!(Message::decode(&[FRAME_TAG, 0, 0, 0]), Err(Error::UnknownTag(tag)) if tag == FRAME_TAG)
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_datagram() {
+        assert!(matches!(Message::decode(&[]), Err(Error::FrameTooShort(0))));
     }
 }

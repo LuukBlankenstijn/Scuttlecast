@@ -5,8 +5,6 @@ use bytes::Bytes;
 use reed_solomon_erasure::Error;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
-use crate::BLOCK_SIZE;
-
 const MAX_SHARDS_PER_SLICE: usize = 255;
 
 struct Slice {
@@ -41,6 +39,7 @@ pub(super) struct Pushed {
 }
 
 pub(super) struct Window {
+    block_size: usize,
     blocks_per_slice: usize,
     max_parity: usize,
     parity: usize,
@@ -52,6 +51,7 @@ pub(super) struct Window {
 
 impl Window {
     pub(super) fn new(
+        block_size: usize,
         blocks_per_slice: NonZeroU16,
         max_parity: u16,
         max_live_slices: NonZeroUsize,
@@ -63,6 +63,7 @@ impl Window {
         }
 
         let mut window = Self {
+            block_size,
             blocks_per_slice,
             max_parity,
             parity: 0,
@@ -116,8 +117,8 @@ impl Window {
     }
 
     /// Seals the slice being filled and returns the parity it produced, or
-    /// `None` when nothing was buffered. Parity shards are always `BLOCK_SIZE`,
-    /// even for a short final slice whose data is zero-padded for the encode.
+    /// `None` when nothing was buffered. Parity shards are always one block
+    /// wide, even for a short final slice whose absent blocks read as zeroed.
     pub(super) fn seal(&mut self) -> Option<Sealed> {
         if self.current.data.is_empty() {
             return None;
@@ -165,47 +166,35 @@ impl Window {
             return Vec::new();
         };
 
-        let mut parity = vec![vec![0u8; BLOCK_SIZE]; self.parity];
-        let full = self.current.data.len() == self.blocks_per_slice
-            && self
-                .current
-                .data
-                .iter()
-                .all(|block| block.len() == BLOCK_SIZE);
+        let mut parity = vec![vec![0u8; self.block_size]; self.parity];
 
-        if full {
-            codec
-                .encode_sep(self.current.data.as_slice(), parity.as_mut_slice())
-                .expect("k data and m parity shards of equal length");
+        if self.current.data.len() == self.blocks_per_slice {
+            codec.encode_sep(&self.current.data, &mut parity)
         } else {
-            let data = self.padded_data();
-            codec
-                .encode_sep(data.as_slice(), parity.as_mut_slice())
-                .expect("k data and m parity shards of equal length");
+            let absent = vec![0u8; self.block_size];
+            let data: Vec<&[u8]> = (0..self.blocks_per_slice)
+                .map(|slot| {
+                    self.current
+                        .data
+                        .get(slot)
+                        .map_or(&absent[..], |block| &block[..])
+                })
+                .collect();
+            codec.encode_sep(&data, &mut parity)
         }
+        .expect("k data and m parity shards of equal length");
 
         parity.into_iter().map(Bytes::from).collect()
-    }
-
-    fn padded_data(&self) -> Vec<Vec<u8>> {
-        (0..self.blocks_per_slice)
-            .map(|index| {
-                let mut shard = vec![0u8; BLOCK_SIZE];
-                if let Some(block) = self.current.data.get(index) {
-                    shard[..block.len()].copy_from_slice(block);
-                }
-                shard
-            })
-            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Pushed, Window};
-    use crate::BLOCK_SIZE;
     use bytes::Bytes;
     use std::num::{NonZeroU16, NonZeroUsize};
+
+    const BLOCK_SIZE: usize = crate::DEFAULT_BLOCK_SIZE as usize;
 
     fn window(blocks_per_slice: u16, max_live_slices: usize) -> Window {
         fec_window(blocks_per_slice, 0, max_live_slices)
@@ -213,6 +202,7 @@ mod tests {
 
     fn fec_window(blocks_per_slice: u16, parity_per_slice: u16, max_live_slices: usize) -> Window {
         Window::new(
+            BLOCK_SIZE,
             NonZeroU16::new(blocks_per_slice).expect("blocks per slice"),
             parity_per_slice,
             NonZeroUsize::new(max_live_slices).expect("max live slices"),
@@ -364,10 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn a_short_final_slice_still_produces_full_length_parity() {
+    fn a_slice_short_of_blocks_still_produces_full_length_parity() {
         let mut window = fec_window(4, 2, 8);
         window.push(full_block(1));
-        window.push(Bytes::from(vec![2u8; 10]));
+        window.push(full_block(2));
 
         let sealed = window.seal().expect("sealed");
 
@@ -378,6 +368,7 @@ mod tests {
     #[test]
     fn rejects_a_shard_budget_over_the_field_limit() {
         let result = Window::new(
+            BLOCK_SIZE,
             NonZeroU16::new(250).expect("blocks per slice"),
             6,
             NonZeroUsize::new(8).expect("max live slices"),
