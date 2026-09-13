@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "scuttlecast"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "bincode",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "scuttlecast-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "scuttlecast",
