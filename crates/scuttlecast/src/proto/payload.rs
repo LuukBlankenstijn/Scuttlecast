@@ -3,13 +3,10 @@ use std::num::{NonZeroU16, NonZeroU32};
 use bincode::{Decode, Encode};
 use derive_more::Display;
 
-/// Sender -> Group, announces the transfer to the group. `max_live_slices` is
-/// how many slices the sender keeps available for repair, which bounds how far
-/// ahead of its own progress a receiver has to buffer.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
-    "Hello(transfer_id={transfer_id}, block_size={block_size}, blocks_per_slice={blocks_per_slice}, parity_per_slice={parity_per_slice}, max_live_slices={max_live_slices})"
+    "Hello(transfer_id={transfer_id}, block_size={block_size}, blocks_per_slice={blocks_per_slice}, parity_per_slice={parity_per_slice}, max_live_slices={max_live_slices}, total_bytes={total_bytes:?})"
 )]
 pub struct Hello {
     pub transfer_id: u64,
@@ -17,14 +14,9 @@ pub struct Hello {
     pub blocks_per_slice: NonZeroU16,
     pub parity_per_slice: u8,
     pub max_live_slices: NonZeroU16,
+    pub total_bytes: Option<u64>,
 }
 
-/// Receiver -> Sender, feeds the rate controller and the retransmit window.
-/// Every counter is cumulative and never resets, so a lost report only widens
-/// the span the next delta covers. `total_expected` is the highest transmission
-/// seen plus one, which makes loss a property of the wire rather than of block
-/// numbering. `next_needed_slice` is the lowest slice not yet handed to the
-/// sink.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
@@ -39,7 +31,6 @@ pub struct Stats {
     pub sink_stall_ms: u32,
 }
 
-/// Receiver -> Sender, request missing shards of a slice
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(
@@ -53,7 +44,6 @@ pub struct Nak {
     pub missing: Vec<u16>,
 }
 
-/// Sender -> Group, drops one receiver from the transfer
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display("Evicted(transfer_id={transfer_id}, target={target}, reason={reason})")]
@@ -63,7 +53,6 @@ pub struct Evicted {
     pub reason: String,
 }
 
-/// Sender -> Group, announces every block has been sent at least once
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Display)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 #[display(

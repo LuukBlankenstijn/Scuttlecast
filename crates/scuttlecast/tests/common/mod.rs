@@ -117,7 +117,7 @@ pub async fn transfer_to_file(group_id: u8, port: u16, bytes: &[u8]) -> Vec<u8> 
     });
 
     let sender = sender(group_ip, port, 1);
-    sender.send_stream(source(bytes)).await.expect("send");
+    sender.send_stream(source(bytes), None).await.expect("send");
 
     receiving.await.expect("join").expect("receive");
     std::fs::read(&path).expect("read output")

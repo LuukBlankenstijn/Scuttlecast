@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 mod receive;
+mod report;
 mod send;
 
 #[derive(Debug, Clone, Subcommand)]

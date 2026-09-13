@@ -1,10 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Read in one go: files and stdin are served by the blocking thread pool
 const READ_AHEAD: usize = 1 << 20;
 
-/// Blocks share the allocation they were read into
 pub(crate) fn split<R: AsyncRead + Unpin>(
     mut reader: R,
     block_size: usize,

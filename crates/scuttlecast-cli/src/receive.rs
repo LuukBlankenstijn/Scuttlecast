@@ -1,6 +1,11 @@
 use clap::Parser;
 use scuttlecast::error::ProtoError;
+use scuttlecast::state::ReceiveState;
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
+use tokio::sync::watch;
+use tracing::info;
+
+use crate::report::REPORT_INTERVAL;
 
 /// Receive a transfer from a multicast group
 #[derive(Debug, Clone, Parser)]
@@ -38,14 +43,20 @@ pub async fn receive(args: Args) -> Result<(), ProtoError> {
         .max_wait(args.wait)
         .build();
 
+    let reporting = tokio::spawn(report(receiver.progress()));
+
     let summary = match args.file {
-        Some(path) => receiver.recv_file(path).await?,
-        None => receiver.recv_to(tokio::io::stdout()).await?,
+        Some(path) => receiver.recv_file(path).await,
+        None => receiver.recv_to(tokio::io::stdout()).await,
     };
 
-    tracing::info!(
+    reporting.abort();
+    let summary = summary?;
+
+    info!(
         bytes = summary.total_bytes,
         blocks = summary.total_blocks,
+        took = %summary.took(),
         duplicates = summary.duplicates,
         late = summary.late,
         naks = summary.naks_sent,
@@ -54,4 +65,26 @@ pub async fn receive(args: Args) -> Result<(), ProtoError> {
     );
 
     Ok(())
+}
+
+async fn report(progress: watch::Receiver<ReceiveState>) {
+    let mut ticker = tokio::time::interval(REPORT_INTERVAL);
+
+    loop {
+        ticker.tick().await;
+        let state = progress.borrow().clone();
+        if state.transfer_id == 0 {
+            continue;
+        }
+
+        info!(
+            progress = %state.progress(),
+            received = %state.received(),
+            rate = %state.rate(),
+            eta = %state.eta(),
+            running_for = %state.running_for(),
+            naks = state.naks,
+            "receiving"
+        );
+    }
 }

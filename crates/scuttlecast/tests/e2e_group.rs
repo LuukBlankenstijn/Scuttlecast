@@ -23,7 +23,7 @@ async fn both_receivers_get_the_whole_payload() {
     let receiving_second = spawn_receiver(20, 13000, second.clone());
 
     common::sender(common::group(20), 13000, 2)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -54,7 +54,7 @@ async fn sender_waits_until_min_receivers_joined() {
 
     let started = Instant::now();
     common::sender(common::group(21), 13010, 2)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
     let waited = started.elapsed();
@@ -78,7 +78,7 @@ async fn sender_proceeds_when_min_receivers_never_arrive() {
     let receiving = spawn_receiver(22, 13020, path.clone());
 
     common::sender_with(common::group(22), 13020, 5, Duration::from_millis(500))
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -100,7 +100,7 @@ async fn three_receivers_get_identical_payloads() {
         .collect();
 
     common::sender(common::group(23), 13030, 3)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -113,7 +113,6 @@ async fn three_receivers_get_identical_payloads() {
     }
 }
 
-/// No receiver can have joined before the first hello goes out
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_with_no_stated_minimum_waits_for_a_receiver() {
     let sent = common::payload(5 * BLOCK_SIZE);
@@ -127,7 +126,7 @@ async fn a_sender_with_no_stated_minimum_waits_for_a_receiver() {
             .max_wait(common::MAX_WAIT)
             .build();
         let sent = sent.clone();
-        async move { sender.send_stream(common::source(&sent)).await }
+        async move { sender.send_stream(common::source(&sent), None).await }
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;

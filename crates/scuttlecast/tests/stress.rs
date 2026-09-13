@@ -33,7 +33,7 @@ async fn multi_slice_transfer_to_three_receivers() {
         .collect();
 
     common::sender(common::group(41), 15010, 3)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -74,7 +74,7 @@ async fn multi_megabyte_transfer_to_three_receivers() {
         .collect();
 
     common::sender(common::group(43), 15030, 3)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 

@@ -16,9 +16,6 @@ fn every_nth_block(step: u64, offset: u64) -> Losing {
     })
 }
 
-/// Swallows each block of a slice a fixed number of times, so recovery needs
-/// as many repairs. Blocks are keyed by position rather than by transmission,
-/// which is what lets a later resend of the same block through.
 fn slice_swallowed(slice_no: u32, times: usize) -> Losing {
     let swallowed: Mutex<HashMap<u16, usize>> = Mutex::new(HashMap::new());
 
@@ -72,7 +69,7 @@ async fn transfer_with_loss(
         .collect();
 
     common::sender(group, port, receiving.len())
-        .send_stream(common::source(bytes))
+        .send_stream(common::source(bytes), None)
         .await
         .expect("send");
 
@@ -84,7 +81,6 @@ async fn transfer_with_loss(
     received
 }
 
-/// Every parity count the sender published while the transfer ran
 async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Losing) -> Vec<u8> {
     let group = common::group(group_id);
     let output = common::Output::new();
@@ -104,7 +100,7 @@ async fn parity_over_transfer(group_id: u8, port: u16, bytes: &[u8], losing: Los
     });
 
     sender
-        .send_stream(common::source(bytes))
+        .send_stream(common::source(bytes), None)
         .await
         .expect("send");
     receiving.await.expect("join").expect("receive");
@@ -180,7 +176,7 @@ async fn repairs_a_gap_that_stalled_the_senders_window() {
     let receiving = tokio::spawn(async move { receiver.recv_file(path).await });
 
     common::sender_windowed(group, port, 1, 2)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -205,7 +201,7 @@ async fn serves_one_repair_for_a_loss_every_receiver_suffered() {
         .collect();
 
     common::sender_without_parity(group, port, 3)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -240,7 +236,7 @@ async fn recovers_from_parity_without_asking_for_anything() {
         .collect();
 
     common::sender(group, port, 3)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -256,7 +252,6 @@ async fn recovers_from_parity_without_asking_for_anything() {
     }
 }
 
-/// Long enough for a receiver to report a loss rate at all
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clean_link_stops_carrying_parity() {
     let sent = common::payload(6000 * BLOCK_SIZE);

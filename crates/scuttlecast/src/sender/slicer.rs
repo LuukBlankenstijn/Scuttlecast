@@ -126,8 +126,6 @@ impl Slicer {
         full.freeze()
     }
 
-    /// Queues every parity shard of a freshly sealed slice, then advances the
-    /// emit floor past it: a slice is only fully queued once its parity is out.
     async fn queue_parity(
         &mut self,
         sealed: Sealed,

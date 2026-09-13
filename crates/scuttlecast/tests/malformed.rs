@@ -18,6 +18,7 @@ fn hello(transfer_id: u64, blocks: u16) -> Hello {
         blocks_per_slice: blocks_per_slice(blocks),
         parity_per_slice: 0,
         max_live_slices: blocks_per_slice(8),
+        total_bytes: None,
     }
 }
 
@@ -74,9 +75,6 @@ async fn rejects_a_slot_outside_its_slice() {
     );
 }
 
-/// A shard names the parity its slice carries, and reconstructing against the
-/// wrong width returns the wrong bytes without reporting anything, so a width
-/// the transfer never allowed is refused before it reaches the codec.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_a_parity_width_the_transfer_never_allowed() {
     let (rogue, receiving, _output) = receive_one_transfer(82, 19020).await;
@@ -113,8 +111,6 @@ async fn rejects_a_parity_width_the_transfer_never_allowed() {
     );
 }
 
-/// A parity slot outside the width its own shard names would address a
-/// recovery shard the codec was never configured for
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_a_parity_slot_outside_the_width_it_names() {
     let (rogue, receiving, _output) = receive_one_transfer(83, 19030).await;
@@ -155,11 +151,11 @@ async fn rejects_a_hello_claiming_zero_blocks_per_slice() {
     let (rogue, receiving, _output) = receive_one_transfer(81, 19010).await;
 
     let mut bytes = Message::Hello(hello(2, 1)).encode().expect("encode");
-    let blocks_per_slice_byte = bytes.len() - 3;
+    let blocks_per_slice_byte = bytes.len() - 4;
     assert_eq!(
         bytes[blocks_per_slice_byte..],
-        [1, 0, 8],
-        "blocks_per_slice, parity_per_slice and max_live_slices trail the message"
+        [1, 0, 8, 0],
+        "blocks_per_slice, parity_per_slice, max_live_slices and total_bytes trail the message"
     );
     bytes[blocks_per_slice_byte] = 0;
 

@@ -3,13 +3,15 @@ use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 use bon::Builder;
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::{
     error::ProtoError,
+    format::Elapsed,
     receiver::session::{Session, join_session},
+    state::ReceiveState,
     transport::{Losing, MessageSocket},
 };
 
@@ -27,6 +29,8 @@ pub struct Receiver {
     } )]
     socket: MessageSocket,
     max_wait: Duration,
+    #[builder(default = watch::channel(ReceiveState::default()).0)]
+    progress: watch::Sender<ReceiveState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,13 +39,10 @@ pub struct TransferSummary {
     pub total_blocks: u64,
     pub received: u64,
     pub expected: u64,
-    /// Shards that arrived twice, which means something was repaired more
-    /// than it needed to be
     pub duplicates: u64,
-    /// Shards for slices already written out, which is the normal cost of
-    /// reconstructing a slice before its last shards arrive
     pub late: u64,
     pub naks_sent: u64,
+    pub duration: Duration,
 }
 
 impl TransferSummary {
@@ -51,11 +52,12 @@ impl TransferSummary {
         }
         1.0 - self.received as f64 / self.expected as f64
     }
+
+    pub fn took(&self) -> impl std::fmt::Display {
+        Elapsed(self.duration)
+    }
 }
 
-/// A transfer in flight. Blocks arrive in order on the handle; the outcome
-/// arrives from `finish`, so a consumer never has to unwrap an error out of
-/// the data it is reading.
 pub struct Transfer {
     blocks: mpsc::Receiver<Bytes>,
     session: JoinHandle<Result<TransferSummary, ProtoError>>,
@@ -75,8 +77,6 @@ impl Transfer {
 }
 
 impl Receiver {
-    /// Applies a loss rule to this receiver's socket, so a test can decide
-    /// exactly which datagrams it never sees
     pub fn losing(mut self, losing: Losing) -> Self {
         self.socket = self.socket.losing(losing);
         self
@@ -102,10 +102,15 @@ impl Receiver {
             .map_err(|error| ProtoError::Timeout(error.to_string()))?
     }
 
+    pub fn progress(&self) -> watch::Receiver<ReceiveState> {
+        self.progress.subscribe()
+    }
+
     pub fn recv_stream(self) -> Transfer {
         let (blocks_tx, blocks) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
         let max_wait = self.max_wait;
         let socket = self.socket;
+        let progress = self.progress;
 
         let session = tokio::spawn(async move {
             let receiver_id = rand::random();
@@ -115,7 +120,7 @@ impl Receiver {
                 receiver_id, "joined session"
             );
 
-            Session::new(socket, sender, receiver_id, &hello)?
+            Session::new(socket, sender, receiver_id, &hello, progress)?
                 .run(blocks_tx)
                 .await
         });

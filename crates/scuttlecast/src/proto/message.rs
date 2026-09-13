@@ -10,13 +10,11 @@ use super::payload::{Done, Evicted, Hello, Nak, Stats};
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum Message {
     Hello(Hello),
-    /// Receiver -> Sender, tells the sender it joined the group
     #[display("Join(transfer_id={transfer_id}, receiver_id={receiver_id})")]
     Join {
         transfer_id: u64,
         receiver_id: u64,
     },
-    /// Receiver -> Sender, tells the sender it left the group
     #[display("Leave(transfer_id={transfer_id}, receiver_id={receiver_id})")]
     Leave {
         transfer_id: u64,

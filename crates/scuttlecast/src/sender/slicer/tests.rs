@@ -59,8 +59,6 @@ async fn fec_run(input: &[u8], blocks_per_slice: u16, parity_per_slice: u8) -> V
     drive(fec_slicer(blocks_per_slice, parity_per_slice), input).await
 }
 
-/// Feeds the requests once the whole input has been sent, then collects the
-/// shards the slicer sends afterwards
 async fn resent_shards(
     input: &[u8],
     blocks_per_slice: u16,

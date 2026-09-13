@@ -7,12 +7,15 @@ use std::{
 use crate::proto::{Done, Error as ProtocolError, Frame, Hello, Message, Nak, Stats};
 use bytes::Bytes;
 use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::watch;
 use tracing::debug;
 
 use crate::{
     RENAK_INTERVAL, SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
+    format::Smoothed,
     receiver::{TransferSummary, assembler::Assembler, naks::Naks},
+    state::ReceiveState,
     transport::{Incoming, MessageSocket},
 };
 
@@ -69,11 +72,17 @@ pub(super) struct Session {
     duplicates: u64,
     late: u64,
     total_bytes: Option<u64>,
+    announced_bytes: Option<u64>,
     written_bytes: u64,
+    bytes_at_last_report: u64,
+    last_report: Instant,
+    bytes_per_second: Smoothed,
     blocks_written: u64,
     sink_stall: Duration,
     last_handover: Instant,
     last_packet: Instant,
+    started: Instant,
+    progress: watch::Sender<ReceiveState>,
 }
 
 impl Session {
@@ -82,6 +91,7 @@ impl Session {
         sender: SocketAddr,
         receiver_id: u64,
         hello: &Hello,
+        progress: watch::Sender<ReceiveState>,
     ) -> Result<Self, ProtoError> {
         let block_size = hello.block_size.get() as usize;
 
@@ -107,11 +117,17 @@ impl Session {
             duplicates: 0,
             late: 0,
             total_bytes: None,
+            announced_bytes: hello.total_bytes,
             written_bytes: 0,
+            bytes_at_last_report: 0,
+            last_report: Instant::now(),
+            bytes_per_second: Smoothed::default(),
             blocks_written: 0,
             sink_stall: Duration::ZERO,
             last_handover: Instant::now(),
             last_packet: Instant::now(),
+            started: Instant::now(),
+            progress,
         })
     }
 
@@ -135,7 +151,10 @@ impl Session {
 
                 _ = sink.reserve(), if !self.pending.is_empty() => {}
 
-                _ = stats_tick.tick() => self.send_stats().await?,
+                _ = stats_tick.tick() => {
+                    self.send_stats().await?;
+                    self.report_progress();
+                }
 
                 _ = renak_tick.tick() => self.request_gaps().await?,
 
@@ -153,6 +172,7 @@ impl Session {
         self.check_byte_total()?;
 
         self.send_stats().await?;
+        self.report_progress();
         self.socket
             .send_control(
                 Message::Leave {
@@ -244,8 +264,6 @@ impl Session {
         Ok(())
     }
 
-    /// A shard the assembler would not take is either late, because its slice
-    /// was already reconstructed and written, or a genuine duplicate
     fn refused(&mut self, slice_no: u32) {
         if slice_no < self.assembler.next_needed() {
             self.late += 1;
@@ -261,7 +279,6 @@ impl Session {
         self.request_gaps().await
     }
 
-    /// Hands over what the sink will take, never waiting for it
     fn hand_over(&mut self, sink: &mpsc::Sender<Bytes>) -> Result<(), ProtoError> {
         let now = Instant::now();
         if !self.pending.is_empty() {
@@ -294,8 +311,6 @@ impl Session {
         Ok(())
     }
 
-    /// The last block of a transfer can carry more than the transfer holds,
-    /// once reconstruction pads a short slice back to full length
     fn within_total(&mut self, block: Bytes) -> Bytes {
         let block = match self.total_bytes {
             Some(total_bytes) => {
@@ -324,6 +339,32 @@ impl Session {
         self.socket.send_control(message, self.sender).await
     }
 
+    fn report_progress(&mut self) {
+        let now = Instant::now();
+        let since_last = (now - self.last_report).as_secs_f64();
+        self.last_report = now;
+
+        let rate = match since_last > 0.0 {
+            true => {
+                let sample = (self.written_bytes - self.bytes_at_last_report) as f64 / since_last;
+                self.bytes_per_second.observe(sample)
+            }
+            false => self.bytes_per_second.current(),
+        };
+        self.bytes_at_last_report = self.written_bytes;
+
+        self.progress.send_replace(ReceiveState {
+            transfer_id: self.transfer_id,
+            announced_bytes: self.total_bytes.or(self.announced_bytes),
+            received_bytes: self.written_bytes,
+            next_needed_slice: self.assembler.next_needed(),
+            duplicates: self.duplicates,
+            naks: self.naks.total(),
+            bytes_per_second: rate,
+            elapsed: now - self.started,
+        });
+    }
+
     async fn request_gaps(&mut self) -> Result<(), ProtoError> {
         let gaps = self.assembler.gaps(self.emit_floor);
 
@@ -348,8 +389,6 @@ impl Session {
         }
     }
 
-    /// A sender whose `Done` promises more than it sent leaves a short file,
-    /// which must never look like success
     fn check_byte_total(&self) -> Result<(), ProtoError> {
         match self.total_bytes {
             Some(expected) if expected != self.written_bytes => {
@@ -371,6 +410,7 @@ impl Session {
             duplicates: self.duplicates,
             late: self.late,
             naks_sent: self.naks.total(),
+            duration: self.started.elapsed(),
         }
     }
 }

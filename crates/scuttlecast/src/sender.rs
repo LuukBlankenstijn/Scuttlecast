@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 use crate::{
     SILENCE_TIMEOUT, STATS_INTERVAL,
     error::ProtoError,
+    format::Smoothed,
     sender::group::Group,
     sender::pacer::{Batching, Pacer, REPAIR_THRESHOLD, RateController, TICK_INTERVAL},
     sender::slicer::Slicer,
@@ -33,13 +34,10 @@ const DEFAULT_BLOCKS_PER_SLICE: NonZeroU16 = NonZeroU16::new(32).expect("nonzero
 const DEFAULT_MAX_LIVE_SLICES: NonZeroU16 = NonZeroU16::new(2048).expect("nonzero");
 const DEFAULT_BLOCK_SIZE: NonZeroU32 = NonZeroU32::new(crate::DEFAULT_BLOCK_SIZE).expect("nonzero");
 
-/// Loss arrives in bursts, so parity covers this multiple of the average
 const PARITY_HEADROOM: f64 = 2.0;
 
-/// Source waits shorter than this are what any pipeline does between blocks
 const SOURCE_WAIT_FLOOR: Duration = Duration::from_millis(TICK_INTERVAL.as_millis() as u64 / 8);
 
-/// A sink waiting this much of a reporting window cannot keep up
 const SINK_STALL_FLOOR: u32 = STATS_INTERVAL.as_millis() as u32 / 4;
 const DEFAULT_PARITY_PER_SLICE: u8 = 8;
 
@@ -55,7 +53,6 @@ pub struct Sender {
     socket: MessageSocket,
     #[builder(default = Duration::new(5 * 60, 0))]
     max_wait: Duration,
-    /// Receivers to wait for before starting
     #[builder(default = 1)]
     min_receivers: usize,
     #[builder(default = DEFAULT_BLOCKS_PER_SLICE)]
@@ -68,40 +65,43 @@ pub struct Sender {
     block_size: NonZeroU32,
     #[builder(default = UNCAPPED_BATCH_SEGMENTS)]
     max_batch_segments: usize,
-    /// Blocks per second the sender will not exceed even when nothing is lost
     max_rate: Option<f64>,
     #[builder(default = watch::channel(TransferState::default()).0)]
     progress: watch::Sender<TransferState>,
 }
 
 impl Sender {
-    /// Applies a loss rule to this sender's socket, so a test can decide
-    /// exactly which replies it never sees
     pub fn losing(mut self, losing: Losing) -> Self {
         self.socket = self.socket.losing(losing);
         self
     }
 
-    /// Follows what the transfer is doing and why it is not going faster
     pub fn progress(&self) -> watch::Receiver<TransferState> {
         self.progress.subscribe()
     }
 
     pub async fn send_file(&self, path: PathBuf) -> Result<(), ProtoError> {
+        let total_bytes = tokio::fs::metadata(&path)
+            .await
+            .map_err(ProtoError::File)?
+            .len();
         let stream = tokio::fs::File::open(path)
             .await
             .map_err(ProtoError::File)?;
-        self.send_stream(stream).await?;
+        self.send_stream(stream, Some(total_bytes)).await?;
         Ok(())
     }
 
     pub async fn send_stream(
         &self,
         reader: impl AsyncRead + Unpin + Send + 'static,
+        announced_bytes: Option<u64>,
     ) -> Result<(), ProtoError> {
         let transfer_id = rand::random();
 
-        let mut group = self.gather_participants(transfer_id).await?;
+        let mut group = self
+            .gather_participants(transfer_id, announced_bytes)
+            .await?;
         if group.len() == 0 {
             return Err(ProtoError::NoParticipants);
         }
@@ -137,6 +137,9 @@ impl Sender {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         let mut blocks_sent = 0u64;
         let mut blocks_at_last_tick = 0u64;
+        let mut blocks_per_second = Smoothed::default();
+        let started = std::time::Instant::now();
+        let mut last_tick = started;
         let mut slices_emitted = 0u32;
         let mut source_wait = Duration::ZERO;
         let mut queued = Vec::with_capacity(drain_limit);
@@ -244,8 +247,16 @@ impl Sender {
 
                     let sent_this_tick = blocks_sent - blocks_at_last_tick;
                     blocks_at_last_tick = blocks_sent;
+                    let since_last_tick = (now - last_tick).as_secs_f64();
+                    last_tick = now;
+                    let achieved_rate = match since_last_tick > 0.0 {
+                        true => sent_this_tick as f64 / since_last_tick,
+                        false => blocks_per_second.current(),
+                    };
                     if sent_this_tick == 0 && !draining {
-                        self.socket.send_to_group(self.hello(transfer_id)).await?;
+                        self.socket
+                            .send_to_group(self.hello(transfer_id, announced_bytes))
+                            .await?;
                     }
 
                     let wanted = parity_for(
@@ -265,7 +276,7 @@ impl Sender {
                             &group,
                             &rate_controller,
                             std::mem::take(&mut source_wait),
-                            sent_this_tick,
+                            achieved_rate,
                             !starved,
                             draining,
                         )
@@ -273,14 +284,16 @@ impl Sender {
                     self.progress.send_replace(TransferState {
                         block_size: self.block_size.get(),
                         transfer_id,
-                        blocks_per_second: sent_this_tick as f64 / TICK_INTERVAL.as_secs_f64(),
+                        blocks_per_second: blocks_per_second.observe(achieved_rate),
                         blocks_sent,
                         slices_emitted,
                         parity_shards: covering,
                         total_blocks: draining.then_some(total_blocks),
+                        announced_bytes,
                         draining,
                         limiting,
                         receivers: group.rows(),
+                        elapsed: now - started,
                     });
                 }
 
@@ -324,6 +337,17 @@ impl Sender {
             }
         };
 
+        self.progress.send_modify(|state| {
+            state.transfer_id = transfer_id;
+            state.block_size = self.block_size.get();
+            state.blocks_sent = blocks_sent;
+            state.slices_emitted = slices_emitted;
+            state.announced_bytes = announced_bytes;
+            state.total_blocks = draining.then_some(total_blocks);
+            state.draining = draining;
+            state.elapsed = started.elapsed();
+        });
+
         let _ = feedback_tx.send(Feedback::Done);
         let _ = slicer_task.await;
         result
@@ -334,7 +358,7 @@ impl Sender {
         group: &Group,
         rate_controller: &RateController,
         source_wait: Duration,
-        sent_this_tick: u64,
+        achieved_rate: f64,
         credit_unused: bool,
         draining: bool,
     ) -> Bottleneck {
@@ -348,23 +372,28 @@ impl Sender {
             worst_sink_stall: group.worst_sink_stall(),
             sink_stall_threshold: SINK_STALL_FLOOR,
             allowed_rate: rate_controller.rate(),
-            achieved_rate: sent_this_tick as f64 / TICK_INTERVAL.as_secs_f64(),
+            achieved_rate,
             credit_unused,
             draining,
         }
     }
 
-    fn hello(&self, transfer_id: u64) -> Message {
+    fn hello(&self, transfer_id: u64, total_bytes: Option<u64>) -> Message {
         Message::Hello(Hello {
             transfer_id,
             block_size: self.block_size,
             blocks_per_slice: self.blocks_per_slice,
             parity_per_slice: self.parity_per_slice,
             max_live_slices: self.max_live_slices,
+            total_bytes,
         })
     }
 
-    async fn gather_participants(&self, transfer_id: u64) -> Result<Group, ProtoError> {
+    async fn gather_participants(
+        &self,
+        transfer_id: u64,
+        total_bytes: Option<u64>,
+    ) -> Result<Group, ProtoError> {
         let mut group = Group::default();
         let start = Instant::now();
         let deadline = start + self.max_wait;
@@ -372,7 +401,11 @@ impl Sender {
 
         loop {
             tokio::select! {
-                _ = hello_tick.tick() => self.socket.send_to_group(self.hello(transfer_id)).await?,
+                _ = hello_tick.tick() => {
+                    self.socket
+                        .send_to_group(self.hello(transfer_id, total_bytes))
+                        .await?
+                }
 
                 r = self.socket.recv_control(Some(transfer_id)) => {
                     let (message, socket) = r?;
@@ -395,8 +428,6 @@ impl Sender {
     }
 }
 
-/// Parity shards covering the loss the worst receiver reports, or the full
-/// width while no receiver has measured one yet
 fn parity_for(loss: Option<f64>, blocks_per_slice: NonZeroU16, max_parity: u8) -> u8 {
     let Some(loss) = loss else {
         return max_parity;

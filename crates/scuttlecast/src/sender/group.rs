@@ -5,9 +5,6 @@ use std::time::{Duration, Instant};
 use crate::proto::{Nak, Stats};
 use crate::{HOLDOFF, state::ReceiverState};
 
-/// Transmissions a reporting window needs before its loss ratio means
-/// anything. Below this a single drop reads as a loss rate high enough to
-/// throttle a healthy network.
 const MIN_LOSS_SAMPLE: u64 = 200;
 
 struct Participant {
@@ -54,14 +51,12 @@ pub struct Group {
 }
 
 impl Group {
-    /// Returns true if the receiver was not already a participant
     pub fn join(&mut self, receiver_id: u64, address: SocketAddr) -> bool {
         self.participants
             .insert(receiver_id, Participant::new(address))
             .is_none()
     }
 
-    /// Returns true if the receiver was a participant
     pub fn leave(&mut self, receiver_id: u64) -> bool {
         self.participants.remove(&receiver_id).is_some()
     }
@@ -101,8 +96,6 @@ impl Group {
         }
     }
 
-    /// Removes participants silent for longer than `timeout`, returning each
-    /// dropped id with the slice it was stuck at
     pub fn reap_silent(&mut self, now: Instant, timeout: Duration) -> Vec<(u64, u32)> {
         let stale: Vec<(u64, u32)> = self
             .participants
@@ -120,15 +113,6 @@ impl Group {
         stale
     }
 
-    /// What the last reporting window cost this participant, as the fraction
-    /// of transmissions it had to ask for again. `None` while too little has
-    /// happened to read a rate from: a window holding twenty packets calls one
-    /// drop five percent, which is enough to end slow start on a healthy
-    /// network, so windows accumulate until they can carry a verdict.
-    ///
-    /// Loss the parity already covered costs nothing and is deliberately not
-    /// reported here. Backing off because of it would slow a transfer that was
-    /// arriving intact.
     pub fn repair_demand(&mut self, stats: &Stats) -> Option<f64> {
         let participant = self.participants.get_mut(&stats.receiver_id)?;
         let current = (stats.total_received, stats.total_expected);
@@ -160,7 +144,6 @@ impl Group {
         Some(participant.unrecovered_loss)
     }
 
-    /// A snapshot of every participant for reporting, slowest last
     pub fn rows(&self) -> Vec<ReceiverState> {
         let mut rows: Vec<_> = self
             .participants
@@ -182,7 +165,6 @@ impl Group {
         rows
     }
 
-    /// The participant the retransmit window is waiting on
     pub fn slowest_participant(&self) -> Option<(u64, u32)> {
         self.participants
             .iter()
@@ -190,8 +172,6 @@ impl Group {
             .map(|(receiver_id, participant)| (*receiver_id, self.slices_behind(participant)))
     }
 
-    /// Wire loss of the worst-placed receiver, before any repair, once a
-    /// window has carried enough transmissions to mean anything
     pub fn worst_loss(&self) -> Option<f64> {
         self.participants
             .values()
@@ -199,7 +179,6 @@ impl Group {
             .reduce(f64::max)
     }
 
-    /// The receiver that spent the most of its last window unable to write
     pub fn worst_sink_stall(&self) -> Option<(u64, u32)> {
         self.participants
             .iter()
@@ -211,10 +190,6 @@ impl Group {
         self.emitted.saturating_sub(participant.next_needed)
     }
 
-    /// Records how many slices the transfer turned out to have. Progress
-    /// reported before this was known says nothing about completion: a
-    /// receiver cannot finish a transfer whose end it has not heard about, so
-    /// every participant has to confirm again afterwards.
     pub fn on_eof(&mut self, total_slices: u32) {
         self.total_slices = Some(total_slices);
         for participant in self.participants.values_mut() {
@@ -222,7 +197,6 @@ impl Group {
         }
     }
 
-    /// Returns the lowest slice the group still wants, if that advanced
     pub fn on_stats(&mut self, stats: &Stats) -> Option<u32> {
         let reached_end = self
             .total_slices
@@ -235,7 +209,6 @@ impl Group {
         self.advance()
     }
 
-    /// Returns the shards that are worth putting back on the wire
     pub fn on_nak(&mut self, nak: &Nak, now: Instant) -> Vec<u16> {
         if !self.contains(nak.receiver_id) || self.nobody_needs(nak.slice_no) {
             return Vec::new();
@@ -282,7 +255,6 @@ impl Group {
         slice_no < self.needed_from
     }
 
-    /// Records the block as requested, returning true if it was not suppressed
     fn suppress(&mut self, block: (u32, u16), now: Instant) -> bool {
         let suppressed = self
             .suppressed

@@ -22,15 +22,11 @@ impl Slice {
     }
 }
 
-/// A slice that has just been sealed, together with the parity it produced.
-/// Empty when the slice carries no parity.
 pub(super) struct Sealed {
     pub(super) slice_no: u32,
     pub(super) parity: Vec<Bytes>,
 }
 
-/// The outcome of pushing one block: its coordinates, plus the seal that block
-/// triggered when it filled the slice.
 pub(super) struct Pushed {
     pub(super) slice_no: u32,
     pub(super) block_in_slice: u16,
@@ -80,9 +76,6 @@ impl Window {
         })
     }
 
-    /// Parity shards the slices started from now on carry, capped by the
-    /// maximum the transfer announced. A slice keeps the width it was created
-    /// with, so that every shard of it can name the same one.
     pub(super) fn cover(&mut self, wanted: u8) {
         self.wanted_parity = (wanted as usize).min(self.max_parity);
     }
@@ -117,9 +110,6 @@ impl Window {
         }
     }
 
-    /// Seals the slice being filled and returns the parity it produced, or
-    /// `None` when nothing was buffered. Parity shards are always one block
-    /// wide, even for a short final slice whose absent blocks read as zeroed.
     pub(super) fn seal(&mut self) -> Option<Sealed> {
         if self.current.data.is_empty() {
             return None;
@@ -145,8 +135,6 @@ impl Window {
         }
     }
 
-    /// Serves any shard of a slice by slot: data blocks occupy `0..k`, parity
-    /// shards `k..k + m`.
     pub(super) fn shard(&self, slice_no: u32, slot: u16) -> Option<&Bytes> {
         let slice = self.slice(slice_no)?;
 

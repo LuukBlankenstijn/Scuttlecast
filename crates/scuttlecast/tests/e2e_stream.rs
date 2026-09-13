@@ -28,7 +28,7 @@ async fn streams_payload_to_a_channel() {
     let receiving = receive_stream(30, 14000).await;
 
     common::sender(common::group(30), 14000, 1)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -41,7 +41,7 @@ async fn streams_partial_final_block() {
     let receiving = receive_stream(31, 14010).await;
 
     common::sender(common::group(31), 14010, 1)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -54,7 +54,7 @@ async fn streams_more_blocks_than_the_channel_holds() {
     let receiving = receive_stream(32, 14020).await;
 
     common::sender(common::group(32), 14020, 1)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
@@ -89,6 +89,7 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
         blocks_per_slice: nonzero(32),
         parity_per_slice: 0,
         max_live_slices: nonzero(8),
+        total_bytes: None,
     }))
     .await;
 
@@ -126,8 +127,6 @@ async fn rejects_a_transfer_whose_done_overstates_the_byte_count() {
     }
 }
 
-/// The payload outruns both buffers, so the receiver.s channel fills and the
-/// sender.s window fills behind it
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn survives_a_consumer_that_stops_reading_past_the_silence_timeout() {
     let sent = common::payload(1024 * BLOCK_SIZE);
@@ -149,9 +148,94 @@ async fn survives_a_consumer_that_stops_reading_past_the_silence_timeout() {
     });
 
     common::sender_windowed(common::group(34), 14040, 1, 9)
-        .send_stream(common::source(&sent))
+        .send_stream(common::source(&sent), None)
         .await
         .expect("send");
 
     assert_eq!(receiving.await.expect("join"), sent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivers_the_payload_whatever_size_the_caller_announced() {
+    let sent = common::payload(8 * BLOCK_SIZE + 11);
+    let receiving = receive_stream(35, 14050).await;
+
+    common::sender(common::group(35), 14050, 1)
+        .send_stream(common::source(&sent), Some(17))
+        .await
+        .expect("send");
+
+    assert_eq!(receiving.await.expect("join"), sent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reports_progress_against_the_announced_size() {
+    let sent = common::payload(512 * BLOCK_SIZE);
+    let receiver = common::receiver(common::group(36), 14060);
+    let mut progress = receiver.progress();
+
+    let receiving = tokio::spawn(async move {
+        let mut transfer = receiver.recv_stream();
+        let mut received = Vec::new();
+        while let Some(block) = transfer.recv().await {
+            received.extend_from_slice(&block);
+        }
+        transfer.finish().await.expect("finish");
+        received
+    });
+
+    let watching = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        while progress.changed().await.is_ok() {
+            let state = progress.borrow_and_update().clone();
+            if let Some(fraction) = state.fraction_complete() {
+                seen.push((fraction, state.elapsed));
+            }
+        }
+        seen
+    });
+
+    common::sender(common::group(36), 14060, 1)
+        .send_stream(common::source(&sent), Some(sent.len() as u64))
+        .await
+        .expect("send");
+
+    assert_eq!(receiving.await.expect("join"), sent);
+
+    let seen = watching.await.expect("join");
+    assert!(
+        seen.iter()
+            .any(|(fraction, _)| *fraction > 0.0 && *fraction < 1.0)
+    );
+    assert_eq!(seen.last().map(|(fraction, _)| *fraction), Some(1.0));
+    assert!(seen.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    assert!(seen.last().expect("a report").1 > Duration::ZERO);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn times_the_transfer_it_just_finished() {
+    let sent = common::payload(64 * BLOCK_SIZE);
+    let receiver = common::receiver(common::group(37), 14070);
+    let started = std::time::Instant::now();
+
+    let receiving = tokio::spawn(async move {
+        let mut transfer = receiver.recv_stream();
+        while transfer.recv().await.is_some() {}
+        transfer.finish().await.expect("finish")
+    });
+
+    common::sender(common::group(37), 14070, 1)
+        .send_stream(common::source(&sent), None)
+        .await
+        .expect("send");
+
+    let summary = receiving.await.expect("join");
+    let wall = started.elapsed();
+
+    assert!(summary.duration > Duration::ZERO);
+    assert!(
+        summary.duration <= wall,
+        "{:?} > {wall:?}",
+        summary.duration
+    );
 }

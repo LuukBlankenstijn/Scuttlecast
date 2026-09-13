@@ -19,9 +19,6 @@ impl Slice {
         }
     }
 
-    /// A slice is reconstructed against the width its shards name, so a shard
-    /// naming a different one is refused rather than allowed to contradict
-    /// what is already stored under the first.
     fn insert(&mut self, slot: u16, parity_width: u8, payload: Bytes) -> bool {
         let Some(cell) = self.slots.get_mut(slot as usize) else {
             return false;
@@ -48,7 +45,6 @@ impl Slice {
             .all(|slot| slot.is_some())
     }
 
-    /// The lowest missing data blocks worth asking for, capped by the shortfall
     fn wanted(&self, target: u16) -> Vec<u16> {
         let shortfall = (target as usize).saturating_sub(self.received as usize);
         self.slots
@@ -75,9 +71,6 @@ pub(super) struct Assembler {
 }
 
 impl Assembler {
-    /// Builds the decoder for the widest parity the transfer allows, so that
-    /// an announcement the codec cannot serve is refused here rather than
-    /// when a slice first needs repairing.
     pub(super) fn new(
         block_size: usize,
         blocks_per_slice: NonZeroU16,
@@ -128,9 +121,6 @@ impl Assembler {
         self.total_blocks = Some(total_blocks);
     }
 
-    /// Returns true if the shard was newly stored. Shards already written out,
-    /// shards too far ahead to buffer, and duplicates are all refused. Data
-    /// blocks land in slots `0..k`, parity shards in `k..k + m`.
     pub(super) fn insert(
         &mut self,
         slice_no: u32,
@@ -149,13 +139,6 @@ impl Assembler {
             .insert(slot, parity_width, payload)
     }
 
-    /// A slice that had to be reconstructed may only be written once its true
-    /// size is settled. Every slice but the last holds `blocks_per_slice`
-    /// blocks; the last holds fewer, and which slice is last is only known
-    /// from `Done` or from a slice above it. With enough parity a short final
-    /// slice reaches the shard count of a full one, and reconstructing it then
-    /// would invent a block the transfer never had. A slice holding all of its
-    /// data blocks is never in doubt.
     fn can_write(&self, slice_no: u32) -> bool {
         self.total_blocks.is_some()
             || self.slices.keys().any(|seen| *seen > slice_no)
@@ -165,9 +148,6 @@ impl Assembler {
                 .is_some_and(|slice| slice.data_present(self.blocks_per_slice))
     }
 
-    /// Hands over every block that can now be written, in order, and advances
-    /// past the slices it emptied, reconstructing the missing data of any slice
-    /// that carries enough parity.
     pub(super) fn take_ready(&mut self) -> Vec<Bytes> {
         let mut ready = Vec::new();
 
@@ -182,8 +162,6 @@ impl Assembler {
         ready
     }
 
-    /// Slices that are still short of shards and lie below `emit_floor`, with
-    /// the shards each one still needs to become recoverable
     pub(super) fn gaps(&self, emit_floor: u32) -> Vec<(u32, Vec<u16>)> {
         let floor = self.total_slices().unwrap_or(emit_floor);
 
@@ -200,9 +178,6 @@ impl Assembler {
             .collect()
     }
 
-    /// A slice is ready once it holds `target` shards of any kind: that is
-    /// enough to reconstruct its data, padding slots of a short final slice
-    /// included.
     fn is_complete(&self, slice_no: u32) -> bool {
         self.slices
             .get(&slice_no)
@@ -249,8 +224,6 @@ impl Assembler {
             .collect()
     }
 
-    /// Recovery shards depend on how many of them a slice was encoded with, so
-    /// a decoder is only valid for slices of that same width.
     fn decoder_for(&mut self, parity_width: u8) -> &mut ReedSolomonDecoder {
         if self.codec.is_none() || self.codec_width != parity_width {
             self.codec = ReedSolomonDecoder::new(
@@ -267,8 +240,6 @@ impl Assembler {
             .expect("the widest parity the transfer allows built a decoder")
     }
 
-    /// Every slice holds `blocks_per_slice` blocks except the last, whose size
-    /// only becomes known when `Done` reports the total
     fn target(&self, slice_no: u32) -> u16 {
         let Some(total_blocks) = self.total_blocks else {
             return self.blocks_per_slice;
@@ -542,9 +513,6 @@ mod tests {
         assert_eq!(assembler.take_ready(), expected);
     }
 
-    /// Recovery shards depend on how many of them a slice was encoded with,
-    /// so a slice sealed at one width has to be reconstructed against that
-    /// width and not against whatever the transfer allowed at its widest.
     #[test]
     fn reconstructs_slices_sealed_at_different_parity_widths() {
         let data: Vec<Vec<u8>> = (0..3).map(shard).collect();

@@ -14,8 +14,6 @@ impl Naks {
         self.total
     }
 
-    /// Keeps the slices worth asking about: ones never asked for, and ones
-    /// whose last request is old enough that the answer was probably lost too
     pub(super) fn due(&mut self, gaps: Vec<(u32, Vec<u16>)>, now: Instant) -> Vec<(u32, Vec<u16>)> {
         let due: Vec<_> = gaps
             .into_iter()

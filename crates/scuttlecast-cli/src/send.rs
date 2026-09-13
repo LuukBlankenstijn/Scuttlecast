@@ -6,12 +6,19 @@ use scuttlecast::state::TransferState;
 use tokio::sync::watch;
 use tracing::{debug, info};
 
+use crate::report::{REPORT_INTERVAL, parse_bytes};
+
 /// Send a file or stream to a multicast group
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     /// File to read from
     #[arg(short, long, value_parser = clap::value_parser!(PathBuf))]
     file: Option<PathBuf>,
+
+    /// Size of the piped stream, such as 4G or 512MiB, reported to receivers
+    /// as progress only
+    #[arg(short, long, conflicts_with = "file", value_parser = parse_bytes)]
+    size: Option<u64>,
 
     /// Interface to use for multicast, defaults to the default interface
     #[arg(short, long, default_value_t = Ipv4Addr::UNSPECIFIED)]
@@ -59,24 +66,43 @@ pub async fn send(args: Args) -> Result<(), ProtoError> {
         .max_wait(args.wait)
         .build();
 
+    let progress = sender.progress();
     let reporting = tokio::spawn(report(sender.progress()));
 
     let outcome = match args.file {
         Some(filepath) => sender.send_file(filepath).await,
-        None => sender.send_stream(tokio::io::stdin()).await,
+        None => sender.send_stream(tokio::io::stdin(), args.size).await,
     };
 
     reporting.abort();
-    outcome
+    outcome?;
+
+    let state = progress.borrow();
+    info!(
+        sent = %state.sent(),
+        took = %state.running_for(),
+        receivers = state.receivers.len(),
+        "transfer complete"
+    );
+
+    Ok(())
 }
 
-async fn report(mut progress: watch::Receiver<TransferState>) {
-    while progress.changed().await.is_ok() {
-        let state = progress.borrow_and_update().clone();
+async fn report(progress: watch::Receiver<TransferState>) {
+    let mut ticker = tokio::time::interval(REPORT_INTERVAL);
 
+    loop {
+        ticker.tick().await;
+        let state = progress.borrow().clone();
+        if state.transfer_id == 0 {
+            continue;
+        }
         info!(
-            rate = format!("{:.1} MiB/s", state.bytes_per_second() / MIB),
-            sent = format!("{:.0} MiB", state.bytes_sent() as f64 / MIB),
+            progress = %state.progress(),
+            sent = %state.sent(),
+            rate = %state.rate(),
+            eta = %state.eta(),
+            running_for = %state.running_for(),
             draining = state.draining,
             limited_by = %state.limiting,
             "sending"

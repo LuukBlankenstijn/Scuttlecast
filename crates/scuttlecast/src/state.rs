@@ -1,16 +1,13 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// Why the transfer is not going faster. Computed every control tick, always
-/// attributable: the window is held by one receiver and the rate by the
-/// worst-conditioned one.
+use crate::format::{Bytes, Elapsed, Eta, Percent, Rate};
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LimitingFactor {
     #[default]
     Unconstrained,
     AtConfiguredMax,
-    /// A receiver is asking for repairs, which is loss the parity could not
-    /// absorb, so the rate is following it down
     RateLimited {
         worst: u64,
         demand: f64,
@@ -22,13 +19,10 @@ pub enum LimitingFactor {
     SourceStarved {
         read_wait_ms: u32,
     },
-    /// A receiver cannot write what it is being sent as fast as it arrives
     SinkStalled {
         receiver: u64,
         stall_ms: u32,
     },
-    /// The sender cannot push its own socket any faster, so the allowance
-    /// goes unused
     SenderBound {
         allowed: f64,
         achieved: f64,
@@ -67,39 +61,24 @@ impl std::fmt::Display for LimitingFactor {
     }
 }
 
-/// What the sender knows about its own bottleneck at one control tick
 pub(crate) struct Bottleneck {
-    /// The participant with the lowest progress, and how far behind it is
     pub slowest: Option<(u64, u32)>,
-    /// The participant losing the most, and its recent loss
-    /// The participant asking for the most repair, and how much of what it
-    /// was sent it had to ask for again
     pub worst_demand: Option<(u64, f64)>,
     pub demand_threshold: f64,
     pub max_live_slices: u32,
     pub at_ceiling: bool,
-    /// Time spent with sending credit but nothing to send
     pub source_wait: Duration,
-    /// The receiver that spent the most of the last tick unable to write what
-    /// it had already received, and how long
     pub worst_sink_stall: Option<(u64, u32)>,
     pub sink_stall_threshold: u32,
     pub allowed_rate: f64,
     pub achieved_rate: f64,
-    /// The pacer had permission to send and did not use it, which rules out
-    /// the pacer itself being the constraint
     pub credit_unused: bool,
     pub draining: bool,
 }
 
-/// How much of its allowance the sender has to be missing before its own
-/// socket counts as the constraint
 const UNUSED_ALLOWANCE: f64 = 0.8;
 
 impl Bottleneck {
-    /// Order matters. A window held open by one receiver still shows a healthy
-    /// rate, and an input that cannot keep up looks like everything being
-    /// idle, so both have to be ruled out before believing the rate.
     pub fn attribute(&self) -> LimitingFactor {
         if let Some((blocked_by, slices_behind)) = self.slowest
             && slices_behind >= self.max_live_slices
@@ -146,12 +125,8 @@ impl Bottleneck {
 pub struct ReceiverState {
     pub receiver_id: u64,
     pub address: SocketAddr,
-    /// Loss over the last reporting window, which is what drives the rate
     pub windowed_loss: f64,
-    /// The fraction of transmissions this receiver had to ask for again, which
-    /// is what the rate follows
     pub unrecovered_loss: f64,
-    /// Loss over the whole transfer so far
     pub lifetime_loss: f64,
     pub next_needed_slice: u32,
     pub slices_behind: u32,
@@ -166,12 +141,13 @@ pub struct TransferState {
     pub blocks_per_second: f64,
     pub blocks_sent: u64,
     pub slices_emitted: u32,
-    /// Parity shards each slice now carries
     pub parity_shards: u8,
     pub total_blocks: Option<u64>,
+    pub announced_bytes: Option<u64>,
     pub draining: bool,
     pub limiting: LimitingFactor,
     pub receivers: Vec<ReceiverState>,
+    pub elapsed: Duration,
 }
 
 impl TransferState {
@@ -183,12 +159,87 @@ impl TransferState {
         self.blocks_sent * self.block_size as u64
     }
 
-    /// The receiver holding the group back, which is the one worth looking at
+    pub fn fraction_complete(&self) -> Option<f64> {
+        self.announced_bytes
+            .filter(|announced| *announced > 0)
+            .map(|announced| (self.bytes_sent() as f64 / announced as f64).min(1.0))
+    }
+
+    pub fn progress(&self) -> impl std::fmt::Display {
+        Percent(self.fraction_complete())
+    }
+
+    pub fn sent(&self) -> impl std::fmt::Display {
+        Bytes(self.bytes_sent())
+    }
+
+    pub fn rate(&self) -> impl std::fmt::Display {
+        Rate(self.bytes_per_second())
+    }
+
+    pub fn eta(&self) -> impl std::fmt::Display {
+        Eta {
+            bytes_left: bytes_left(self.announced_bytes, self.bytes_sent()),
+            bytes_per_second: self.bytes_per_second(),
+        }
+    }
+
+    pub fn running_for(&self) -> impl std::fmt::Display {
+        Elapsed(self.elapsed)
+    }
+
     pub fn slowest(&self) -> Option<&ReceiverState> {
         self.receivers
             .iter()
             .max_by_key(|receiver| receiver.slices_behind)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReceiveState {
+    pub transfer_id: u64,
+    pub announced_bytes: Option<u64>,
+    pub received_bytes: u64,
+    pub next_needed_slice: u32,
+    pub duplicates: u64,
+    pub naks: u64,
+    pub bytes_per_second: f64,
+    pub elapsed: Duration,
+}
+
+impl ReceiveState {
+    pub fn fraction_complete(&self) -> Option<f64> {
+        self.announced_bytes
+            .filter(|announced| *announced > 0)
+            .map(|announced| (self.received_bytes as f64 / announced as f64).min(1.0))
+    }
+
+    pub fn progress(&self) -> impl std::fmt::Display {
+        Percent(self.fraction_complete())
+    }
+
+    pub fn received(&self) -> impl std::fmt::Display {
+        Bytes(self.received_bytes)
+    }
+
+    pub fn rate(&self) -> impl std::fmt::Display {
+        Rate(self.bytes_per_second)
+    }
+
+    pub fn eta(&self) -> impl std::fmt::Display {
+        Eta {
+            bytes_left: bytes_left(self.announced_bytes, self.received_bytes),
+            bytes_per_second: self.bytes_per_second,
+        }
+    }
+
+    pub fn running_for(&self) -> impl std::fmt::Display {
+        Elapsed(self.elapsed)
+    }
+}
+
+fn bytes_left(announced_bytes: Option<u64>, done: u64) -> Option<u64> {
+    Some(announced_bytes?.saturating_sub(done))
 }
 
 #[cfg(test)]

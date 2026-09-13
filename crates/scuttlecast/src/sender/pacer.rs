@@ -2,12 +2,8 @@ use std::{collections::HashMap, time::Duration};
 
 use tokio::time::Instant;
 
-/// Repair demand a healthy transfer stays under: the fraction of
-/// transmissions receivers have to ask for again. Below this the rate grows;
-/// above it the rate backs off.
 pub const REPAIR_THRESHOLD: f64 = 0.005;
 
-/// How much a reduction has to lower demand to count as having helped
 const DEMAND_IMPROVEMENT: f64 = 0.8;
 const K: f64 = 4.0;
 const MIN_FACTOR: f64 = 0.5;
@@ -48,7 +44,6 @@ impl Pacer {
         self.last_refill = now;
     }
 
-    /// Records that traffic was ready and the pacer made it wait
     pub fn waited(&mut self) {
         self.waited = true;
     }
@@ -142,8 +137,6 @@ impl RateController {
         self.ceiling.is_some_and(|ceiling| self.rate >= ceiling)
     }
 
-    /// The receiver needing the most repair right now, which is the one the
-    /// rate follows
     pub fn worst(&self) -> Option<(u64, f64)> {
         let now = Instant::now();
         self.clients
@@ -153,8 +146,6 @@ impl RateController {
             .map(|(id, client)| (*id, client.ewma))
     }
 
-    /// `demand` is the fraction of transmissions a receiver had to ask for
-    /// again, so loss the parity absorbed never reaches the rate.
     pub fn on_report(&mut self, id: u64, demand: f64) {
         let now = Instant::now();
         let entry = self.clients.entry(id).or_insert(ClientLoss {
@@ -213,11 +204,6 @@ impl RateController {
             .reduce(f64::max)
     }
 
-    /// Reducing the rate only helps when the loss came from sending too fast.
-    /// A link that drops a steady fraction of packets drops the same fraction
-    /// however slowly it is fed, so a reduction that did not lower demand is
-    /// not repeated: otherwise the rate ratchets to the floor and the transfer
-    /// crawls for nothing.
     fn backing_off_helps(&self, demand: f64) -> bool {
         self.demand_when_reduced
             .is_none_or(|before| demand < before * DEMAND_IMPROVEMENT)

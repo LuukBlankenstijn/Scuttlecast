@@ -15,10 +15,6 @@ use crate::proto::{
 
 mod offload;
 
-/// Asked for on both sockets. The default of a couple of hundred kilobytes is
-/// a few milliseconds of buffering at LAN speed, so a receiver pausing to
-/// write to disk drops datagrams that were never lost in transit. The kernel
-/// clamps this to `net.core.rmem_max` and `net.core.wmem_max`.
 const BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 const RECV_BUFFER_SIZE: usize = u16::MAX as usize + 1;
@@ -84,8 +80,6 @@ impl MessageSocket {
         })
     }
 
-    /// Discards datagrams the loss rule rejects, which is how tests reproduce
-    /// a lossy network exactly rather than hoping for one
     pub fn losing(mut self, losing: Losing) -> Self {
         self.losing = losing;
         self
@@ -198,7 +192,6 @@ fn classify(datagram: Bytes) -> Result<Incoming, ProtocolError> {
 
 type Rule = Arc<dyn Fn(&Incoming) -> bool + Send + Sync>;
 
-/// A rule deciding which arriving datagrams to pretend never arrived
 #[derive(Clone, Default)]
 pub struct Losing(Option<Rule>);
 
